@@ -1,0 +1,42 @@
+# Local Postgres for FireProtector. `scripts/setup_db.sh` brings this up and
+# loads the Catalonia building register into it.
+services:
+  db:
+    image: postgres:18
+    container_name: fireprotector-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fireprotector}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fireprotector}
+      POSTGRES_DB: ${POSTGRES_DB:-fireprotector}
+      # Pinned explicitly: postgres:18 moved its default data directory, and
+      # this keeps the named volume valid whichever image tag is used.
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      # Bound to loopback: the database is not exposed to the network.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      # Staging area the loader writes CSVs to and the server COPYs from.
+      - ./db/import:/import
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fireprotector} -d ${POSTGRES_DB:-fireprotector}"]
+      interval: 2s
+      timeout: 3s
+      retries: 45
+    # Tuned for one long series of bulk inserts. max_wal_size stays modest on
+    # purpose: a larger checkpoint target speeds the load up slightly but lets
+    # WAL grow by that much on disk, which is not worth it here.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - synchronous_commit=off
+
+volumes:
+  pgdata:

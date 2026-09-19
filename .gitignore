@@ -1,0 +1,14 @@
+# Loader staging area (CSV batches, deleted as they are loaded)
+db/import/*
+!db/import/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+scripts/.venv/
+
+# Local environment
+.env
+
+.DS_Store
