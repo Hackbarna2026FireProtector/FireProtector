@@ -1,73 +1,94 @@
 # FireProtector backend
 
-Asset-register API for the wildfire values-at-risk tool, over the Catalonia
-building register and the public forests of Catalonia. `GET /assets` implements
-the shared asset-register contract; the other two routes are internal. The API
-and Postgres both run in Docker, defined in `docker-compose.yml`.
+Asset-register API for the wildfire values-at-risk tool. FastAPI over Postgres,
+both in Docker. `GET /assets` implements a contract shared with other people's
+code; the other two routes are internal.
 
-## Setup
+Start with [Orientation](#orientation) and [Contract
+invariants](#contract-invariants). The invariants are the part that fails
+quietly.
 
-From the repo root:
+---
 
-```bash
-./backend/scripts/setup_db.sh
-```
+## Orientation
 
-This starts Postgres, creates the `protection` schema, loads the asset and
-forest data, then builds and starts the API. Everything is up when it finishes:
+**What is real:** the data. 4,269,286 point assets and 1,185 forest polygons,
+both loaded from official INSPIRE sources, queryable by bounding box with
+paging that works.
 
-- Assets: http://localhost:5102/assets?bbox=1.0,41.6,1.6,42.0
-- Interactive docs: http://localhost:5102/docs
-- Health check: http://localhost:5102/health
+**What is not:** the scoring. Three fields are placeholders.
 
-Port 5102 is the one the asset-register contract names, so the frontend and the
-decision layer find the API where they expect it. Both ports are bound to
-loopback.
-
-## Day to day
-
-```bash
-cd backend
-docker compose up -d          # start (data is already in the volume)
-docker compose logs -f api    # follow API logs
-docker compose down           # stop; the volume and its data survive
-docker compose exec db psql -U fireprotector
-```
-
-`app/` is mounted into the container and uvicorn runs with `--reload`, so code
-edits take effect without a rebuild. Rebuild only when `requirements.txt`
-changes:
-
-```bash
-docker compose up -d --build api
-```
-
-### Running the API on the host instead
-
-Useful for a debugger. The database still comes from Docker.
-
-```bash
-cd backend
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env          # already points at localhost:5432
-.venv/bin/uvicorn app.main:app --reload
-```
-
-`.env` is gitignored — keep connection strings out of commits. The container
-ignores it and takes its settings from `docker-compose.yml`.
-
-## `GET /assets`
-
-The contract endpoint. Returns a GeoJSON `FeatureCollection` of the assets
-inside a bounding box: point assets from `protection.asset_specs` and forest
-polygons from `protection.forest_areas`, in one response.
-
-| Parameter | Required | Description |
+| Field | Loaded value | Where it comes from |
 |---|---|---|
-| `bbox` | yes | `minLon,minLat,maxLon,maxLat` in EPSG:4326 degrees — **longitude first**, the opposite order of `/building_specs` |
-| `limit` | no | Features per page. Defaults to `ASSETS_PAGE_SIZE` (1000), which is also the ceiling |
-| `offset` | no | Features to skip. Defaults to 0 |
+| `name` | `"residential"` for every loaded row | The INSPIRE building register carries no names at all — it is a register of footprints, not of named places |
+| `value` | `1` for every loaded row | Column default. 1 means "not scored yet" |
+| `vulnerability` | `0.5` for everything | `app/vulnerability.py`, which is a stub |
+
+A response is therefore **structurally valid and carries no risk signal**. If
+you are here to make the tool rank things, see [Replacing the
+placeholders](#replacing-the-placeholders) — you should not need to touch the
+endpoint.
+
+**What the asset register is not:** a register of hospitals and substations.
+It is the building footprint register, where 86% of rows have no type at all
+and exactly **one** row in Catalonia is typed `hospital`. Real named
+infrastructure arrives through `POST /add_building`, or by loading another
+source. Do not assume `asset_type` is meaningful for most rows.
+
+---
+
+## Contract invariants
+
+`GET /assets` is consumed by code we do not own. These rules are not style
+preferences — breaking them produces wrong answers rather than errors.
+
+1. **`bbox` is longitude-first**: `minLon,minLat,maxLon,maxLat`. This is the
+   opposite order of the `lat`/`lon` parameters `/building_specs` takes. Swap
+   them and the API returns a plausible, empty, wrong answer.
+2. **`asset_id` must be unique within a response.** The consumer rejects the
+   *entire response* on a duplicate, not just the offending feature. This is why
+   ids are prefixed (`asset-<id>`, `forest-<localId>`) — the two tables have
+   separate id spaces that would otherwise collide. Union in a third source and
+   you must give it its own prefix.
+3. **Paging must be totally ordered.** `ORDER BY wire_id` is what stops a page
+   repeating or skipping rows under offset paging. Remove or weaken it and
+   pagination silently loses assets — in a fire tool, assets in the fire's path.
+4. **Every property is required.** `asset_id`, `asset_type`, `name`, `value`,
+   `vulnerability`, `source` — a null in any of them makes the response invalid.
+   This is why the columns are `NOT NULL` with defaults, and why `_clean_name`
+   falls back to `"unnamed"` rather than returning nothing.
+5. **Ranges are enforced**: `value` 1–100, `vulnerability` 0–1, `name` ≤ 120
+   characters. The endpoint clamps and truncates rather than trusting the data,
+   so one bad row cannot invalidate a whole page.
+6. **Errors are 400 or 500 only**, in the envelope
+   `{"error": {"code", "message"}}`. FastAPI's native 422 is mapped to 400
+   application-wide. This is why `/assets` takes every query parameter as a
+   *string* and validates by hand — declaring `limit: int` would let FastAPI
+   raise a 422 the contract does not define.
+7. **`next` is the only signal that more data exists.** The contract has no
+   `limit` parameter and no `truncated` flag, so a bare `?bbox=` request returns
+   the first 1000 features and *looks complete*. Consumers must follow `next`.
+   A 50 × 44 km box holds ~127,000 features — 127 pages.
+
+`numberMatched`, `numberReturned` and `next` are additions beyond the contract.
+They are legal because the contract's schema does not set
+`additionalProperties: false`, and a consumer validating against it still passes.
+
+---
+
+## Endpoints
+
+### `GET /assets` — the contract endpoint
+
+GeoJSON `FeatureCollection` of everything in a bounding box: point assets from
+`protection.asset_specs` and forest polygons from `protection.forest_areas`,
+unioned into one response.
+
+| Parameter | Required | Notes |
+|---|---|---|
+| `bbox` | yes | `minLon,minLat,maxLon,maxLat`, EPSG:4326. **Longitude first** |
+| `limit` | no | Defaults to `ASSETS_PAGE_SIZE` (1000), which is also the ceiling |
+| `offset` | no | Defaults to 0 |
 
 ```bash
 curl "http://localhost:5102/assets?bbox=2.78,41.69,2.84,41.74&limit=2"
@@ -96,245 +117,105 @@ curl "http://localhost:5102/assets?bbox=2.78,41.69,2.84,41.74&limit=2"
 }
 ```
 
-### Things a consumer needs to know
+Forests appear as `MultiPolygon` features with `asset_type: "forest"`, a real
+name (`"FORESTS MUNICIPALS DE LLORET DE MAR"`), and constant `value: 1` /
+`source: "INSPIRE"` — the forest table has no columns for either.
 
-- **Follow `next`.** The contract has no paging, so a bare `?bbox=` request
-  returns the first 1000 features and looks complete. A 50 × 44 km box holds
-  around 127,000 features, which is 127 pages. `next` is `null` on the last one.
-- **`numberMatched` / `numberReturned`** are extra top-level fields. The
-  contract does not forbid them, so a consumer validating against it still
-  passes.
-- **Almost no `asset_type` is in the contract's enum.** Every value is
-  `residential`, `forest`, or an INSPIRE building nature (`shed`, `canopy`,
-  `storageTank`, `greenhouse`, `tower`) — the enum is explicitly open, so
-  consumers take their unknown-type path for effectively all of our data.
-- **`value` is 1 and `vulnerability` is 0.5 for everything loaded.** Neither is
-  scored yet, so nothing in a response ranks anything. See
-  [Vulnerability](#vulnerability) below.
-- **`asset_id` is prefixed** — `asset-<id>` for points, `forest-<localId>` for
-  forests — so the two layers cannot collide. Ids are unique within a response,
-  which the contract requires.
-- **Paging is ordered by `asset_id`** so a page never repeats or skips a row.
-  The order is lexical, so every point precedes every forest.
+`asset_type` is an **open enum**. The contract lists `hospital`, `school`,
+`substation` and so on, but our values are `residential`, `forest` and the
+INSPIRE building natures (`shed`, `canopy`, `storageTank`, `greenhouse`,
+`tower`). Consumers take their unknown-type path for effectively all of our
+data, which the contract explicitly allows.
 
-### Vulnerability
+Ordering is lexical on the prefixed id, so **every point precedes every
+forest**. That is a side effect of the ordering requirement, not a feature.
 
-`app/vulnerability.py` is a **stub**: it returns 0.5 for everything. The real
-model replaces the body of `vulnerability(asset)` and nothing else changes —
-the endpoint calls it once per feature and hands it the whole row, so a model
-that needs coordinates, municipality or provenance can read them without
-touching any caller. The return value is clamped to 0–1, so a replacement that
-returns something out of range cannot produce a response the consumer rejects.
+### `GET /building_specs` — internal
 
-## Errors
+A centre and a radius rather than a box, which suits a map UI. Takes `lat`,
+`lon`, `size_km`, optional `limit`; returns `{center, size_km, bounds, count,
+limit, truncated, buildings[]}` where each row is the table as stored. Not part
+of the contract, no forests, no `vulnerability`.
 
-Every error uses the contract's envelope, on all three routes:
+### `POST /add_building` — internal
+
+The write path for real named assets. Body keys must be real columns; `latitude`
+and `longitude` are required, everything else falls back to the column default.
+`asset_id` is generated and cannot be supplied. **`source` defaults to
+`INSPIRE`**, so pass your own (`"manual"`, `"osm"`) for anything that is not
+from the register, or it will be labelled as official data.
+
+Accepts a single object or a list (up to `MAX_INSERT_ROWS`). A batch is atomic.
+The body is validated against the table's real columns read from the Postgres
+catalog, so a typo returns a 400 naming the valid columns.
+
+### `GET /health`
+
+`{"status", "database", "detail"}`. **The container's `HEALTHCHECK` depends on
+this route** — removing it breaks container health, and it is not in the
+contract, so do not "tidy" it away.
+
+### Errors
+
+Every route, one envelope:
 
 ```json
-{ "error": { "code": "bad_request", "message": "'bbox' is malformed: expected minLon,minLat,maxLon,maxLat in EPSG:4326 degrees, got 'nonsense'." } }
+{ "error": { "code": "bad_request", "message": "'bbox' minLon 1.6 is above maxLon 1.0." } }
 ```
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `bad_request` | Missing or malformed `bbox`, `limit`/`offset` that is not a whole number or is out of range, a bad column or coordinate in a POST body, or a constraint violation |
+| 400 | `bad_request` | Missing/malformed `bbox`, bad `limit`/`offset`, bad column or coordinate in a POST body, constraint violation |
 | 404 | `not_found` | Unknown path |
-| 409 | `conflict` | Unique constraint violation |
-| 500 | `internal_error` | Unhandled error. The detail is logged, not returned |
-| 503 | `unavailable` | Table not found, or the database is unreachable |
+| 409 | `conflict` | Unique constraint violation (e.g. duplicate `source_id`) |
+| 500 | `internal_error` | Unhandled. Logged in full, reported generically — an exception string can leak connection details |
+| 503 | `unavailable` | Table missing or database unreachable |
 
-FastAPI's usual 422 for a validation failure is reported as **400**, because
-the contract defines only 400 and 500.
+Installed globally by `install_handlers()` in `app/errors.py`.
 
-## `GET /building_specs`
+---
 
-Internal route, not part of the contract. Returns every row of the asset table
-whose point falls inside a square of `size_km` × `size_km` centred on the given
-coordinate — a centre and a radius rather than a box, which suits a map UI.
+## Data model
 
-| Parameter | Required | Description |
-|---|---|---|
-| `lat` | yes | Latitude of the centre, −90…90 (WGS84 degrees) |
-| `lon` | yes | Longitude of the centre, −180…180 |
-| `size_km` | yes | Side length of the square in km (the centre is in the middle, so the box extends `size_km / 2` in each direction) |
-| `limit` | no | Max rows; defaults to `DEFAULT_LIMIT` (500), capped at `MAX_LIMIT` (10000) |
+Both tables are loaded from INSPIRE by `scripts/setup_db.sh`. No PostGIS.
 
-```bash
-curl "http://localhost:5102/building_specs?lat=41.80&lon=1.25&size_km=10"
-```
-
-```json
-{
-  "center": { "latitude": 41.8, "longitude": 1.25 },
-  "size_km": 10.0,
-  "bounds": {
-    "min_latitude": 41.75503398181377,
-    "max_latitude": 41.84496601818623,
-    "min_longitude": 1.1896814676725258,
-    "max_longitude": 1.3103185323274742
-  },
-  "count": 2,
-  "limit": 500,
-  "truncated": false,
-  "buildings": [
-    {
-      "asset_id": 1869264, "source_id": "ID.BU.lloret-de-mar.a1b2", "name": "residential",
-      "asset_type": "residential", "value": 1, "source": "INSPIRE",
-      "latitude": 41.8, "longitude": 1.25, "municipality_id": "17095"
-    }
-  ]
-}
-```
-
-Notes:
-
-- The north-south side is exactly `size_km`; the east-west side is `size_km`
-  measured along the parallel through the centre, so the box is square on the
-  ground rather than in degrees.
-- Rows come back nearest-to-centre first, with **all** table columns as stored —
-  the endpoint does not need changing when the dataset gains columns.
-- `truncated: true` means the row cap was hit and more assets may lie in the box.
-- Rows are the table as stored, so they carry `asset_id`/`source_id`/`asset_type`
-  rather than the old `building`/`building_type`, and no `vulnerability` — that
-  is computed by `/assets` only. Forests are not included here.
-
-## `POST /add_building`
-
-Internal route, not part of the contract. Inserts one asset, or a list of them,
-into the same table `/assets` and `/building_specs` read — the write path for
-real named assets, which the INSPIRE register does not provide. The body's keys
-must be columns of that table; `latitude` and `longitude` are required,
-everything else is optional and falls back to the column's database default.
-
-`asset_id` is generated, so it cannot be supplied. `source` defaults to
-`INSPIRE`, so pass your own (`"manual"`, `"osm"`, …) for anything that is not
-from the register.
-
-```bash
-curl -X POST http://localhost:5102/add_building \
-  -H 'Content-Type: application/json' \
-  -d '{"name": "Hospital Comarcal", "building_type": "hospital",
-       "latitude": 41.84, "longitude": 1.30, "floors": 5}'
-```
-
-```json
-{
-  "inserted": 1,
-  "buildings": [
-    { "id": 1, "name": "Hospital Comarcal", "building_type": "hospital",
-      "latitude": 41.84, "longitude": 1.3, "floors": 5, "created_at": "..." }
-  ]
-}
-```
-
-Send a JSON array to load several at once (up to `MAX_INSERT_ROWS`, default 1000):
-
-```bash
-curl -X POST http://localhost:5102/add_building \
-  -H 'Content-Type: application/json' \
-  -d '[{"name": "Escola Segarra", "latitude": 41.82, "longitude": 1.27},
-       {"name": "Substation East", "latitude": 41.78, "longitude": 1.31}]'
-```
-
-Notes:
-
-- Responds **201** with the rows as stored, so you get back database-generated
-  values (ids, defaults, timestamps, generated columns).
-- Rows in one request need not have the same keys; a row that omits a column
-  gets that column's default.
-- A batch is **atomic** — if any row fails, none are written.
-- The body is validated against the table's real columns, read from the
-  catalog, so a typo comes back as a 400 naming the valid columns rather than a
-  raw Postgres error.
-
-| Status | Meaning |
-|---|---|
-| 201 | Rows inserted |
-| 400 | Bad column name, missing/out-of-range coordinates, a malformed body, or a constraint violation |
-| 409 | Unique constraint violation (e.g. a duplicate `source_id`) |
-| 503 | Table not found, or the database is unreachable |
-
-All of them use the [error envelope](#errors).
-
-
-## Configuration
-
-All settings come from the environment or `.env` (see `.env.example`):
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `DATABASE_URL` | — | Postgres connection string (required) |
-| `ASSET_SPECS_TABLE` | `protection.asset_specs` | Point assets; `schema.table` is accepted |
-| `FOREST_AREAS_TABLE` | `protection.forest_areas` | Forest polygons, unioned in by `/assets` |
-| `LATITUDE_COLUMN` | `latitude` | Latitude column name |
-| `LONGITUDE_COLUMN` | `longitude` | Longitude column name |
-| `DEFAULT_LIMIT` | `500` | Row cap when `limit` is not given |
-| `MAX_LIMIT` | `10000` | Hard row cap for `/building_specs` |
-| `ASSETS_PAGE_SIZE` | `1000` | Page size for `/assets`; also its ceiling |
-| `MAX_INSERT_ROWS` | `1000` | Max rows per `POST /add_building` |
-| `POOL_MIN_SIZE` / `POOL_MAX_SIZE` | `1` / `10` | Connection pool sizing |
-| `CORS_ORIGINS` | `["*"]` | Browser origins allowed to call the API |
-| `API_PORT` | `5102` | Host port in `docker-compose.yml` |
-
-## The tables
-
-Both are loaded from INSPIRE by `scripts/setup_db.sh`. No PostGIS is required
-anywhere: coordinates are plain numeric columns and polygons are GeoJSON.
-
-### `protection.asset_specs`
-
-4,269,286 point assets — the INSPIRE building register, migrated in place from
-the original `building_specs` when the API adopted the contract.
+### `protection.asset_specs` — 4,269,286 rows
 
 | Column | Type | Notes |
 |---|---|---|
-| `asset_id` | `bigint` | Generated primary key. Served as `asset-<id>` |
-| `source_id` | `text` | INSPIRE localId, `ID.BU.<slug>.<uuid>`. Unique, so the loader upserts on it and a re-run cannot duplicate a municipality. Null for assets added through `/add_building` |
-| `name` | `text` | `'residential'` for every loaded row — the register carries no names at all |
-| `asset_type` | `text` | INSPIRE building nature (`shed`, `storageTank`, `tower`, …), `'residential'` for the 3,674,190 rows the source leaves untyped |
-| `value` | `numeric` | Relative importance, 1–100. Defaults to **1**, meaning "not scored yet" |
-| `source` | `text` | Provenance. Defaults to `'INSPIRE'` |
-| `latitude` | `double precision` | Point on the footprint, not the centroid |
-| `longitude` | `double precision` | |
-| `municipality_id` | `text` | 5-digit INE code; text, because 56 begin with a zero. Kept for joins, never served |
+| `asset_id` | `bigint` | Generated identity, primary key. Served as `asset-<id>` |
+| `source_id` | `text` | INSPIRE localId, `ID.BU.<slug>.<uuid>`. **UNIQUE — this is the loader's upsert key.** Null for rows added via `/add_building` |
+| `name` | `text` | `'residential'` for every loaded row |
+| `asset_type` | `text` | INSPIRE building nature, `'residential'` for the 3,674,190 untyped rows |
+| `value` | `numeric` | 1–100. Defaults to 1 |
+| `source` | `text` | Defaults to `'INSPIRE'` |
+| `latitude`, `longitude` | `double precision` | Point on the footprint, not the centroid. Serves the bbox filter |
+| `municipality_id` | `text` | 5-digit INE code. Text, because 56 Catalan municipalities have a leading zero. Kept for joins, never served |
 
-`vulnerability` is deliberately **not** a column — it is computed per response
-by `app/vulnerability.py`.
+Type distribution, for calibration: `residential` 3,674,190 · `shed` 483,998 ·
+`canopy` 52,579 · `storageTank` 44,640 · `greenhouse` 8,303 · `tower` 5,575 ·
+`hospital` 1.
 
-If the table is missing, the routes return **503** naming the table and columns
-they looked for. Point `ASSET_SPECS_TABLE` / `LATITUDE_COLUMN` /
-`LONGITUDE_COLUMN` elsewhere to read a different table. The bounding-box filter
-is served by `asset_specs_lat_lon_idx`.
+There is **no `vulnerability` column** — it is computed per response.
 
-### `protection.forest_areas`
+### `protection.forest_areas` — 1,185 rows, 523,988 ha
 
-The 1,185 public forests of Catalonia, 523,988 ha in all — the INSPIRE *Forest
-management areas* dataset (theme AM), published by the Departament
-d'Agricultura, Ramaderia, Pesca i Alimentació under CC BY 4.0.
+The INSPIRE *Forest management areas* dataset (theme AM), published by the
+Departament d'Agricultura, Ramaderia, Pesca i Alimentació under CC BY 4.0.
 
-| Column | Type | Notes |
-|---|---|---|
-| `forest_id` | `text` | Primary key. INSPIRE localId, `ID.AM.forest.<n>` |
-| `name` | `text` | e.g. `OBAGA I SOLANA` |
-| `cup_code` | `text` | Number in the Catàleg de Forests d'Utilitat Pública; null for the 508 that are not catalogued |
-| `elenc_code` | `text` | Number in the Elenc de forests de titularitat pública |
-| `has_agreement` | `boolean` | Privately owned, managed by the Generalitat under an agreement (531) |
-| `has_management_plan` | `boolean` | Covered by an approved forest management plan (462) |
-| `certification` | `text` | `Sistema de Certificació PEFC` for 49 forests, else null |
-| `area_ha` | `double precision` | From the geometry, through an equal-area projection |
-| `latitude`, `longitude` | `double precision` | A point guaranteed to be **inside** the forest. Named to match `asset_specs`, so the same bounding-box query serves both tables |
-| `min_latitude` … `max_longitude` | `double precision` | The forest's envelope |
-| `version_id` | `text` | INSPIRE versionId of the source feature, e.g. `20250714` |
-| `geometry` | `jsonb` | GeoJSON MultiPolygon, ETRS89 geographic, lon/lat; ~17 kB each |
+Key columns: `forest_id` (PK, `ID.AM.forest.<n>`), `name` (real names),
+`cup_code`, `has_management_plan`, `area_ha`, `latitude`/`longitude` (a point
+guaranteed *inside* the forest), the envelope `min_latitude`…`max_longitude`,
+and `geometry` (GeoJSON `MultiPolygon`, lon/lat, ~17 kB each).
 
-There is no index beyond the primary key, on purpose: at 1,185 rows a scan of
-everything but the geometry takes a fraction of a millisecond.
+No index beyond the primary key: at 1,185 rows a scan of everything but the
+geometry takes a fraction of a millisecond.
 
-The polygons are the expensive column, so narrow with the envelope in SQL and
-test exactly in Python:
+Envelope columns exist so a fire perimeter can be tested cheaply in SQL before
+anything loads the polygons:
 
 ```sql
-SELECT forest_id, name, geometry
-FROM protection.forest_areas
+SELECT forest_id, name, geometry FROM protection.forest_areas
 WHERE max_latitude  >= %(min_lat)s AND min_latitude  <= %(max_lat)s
   AND max_longitude >= %(min_lon)s AND min_longitude <= %(max_lon)s;
 ```
@@ -344,94 +225,248 @@ from shapely.geometry import Point, shape
 from shapely.prepared import prep
 
 forest = prep(shape(row["geometry"]))      # jsonb arrives as a dict
-at_risk = [b for b in buildings if forest.covers(Point(b["longitude"], b["latitude"]))]
+at_risk = [a for a in assets if forest.covers(Point(a["longitude"], a["latitude"]))]
 ```
 
-This is the **public forest estate**, not a vegetation or fuel map: it covers
-the forests the Generalitat manages, a fraction of Catalonia's forest cover.
-For continuous land cover the same service publishes
-`inspire:LC.LandCoverSurfaces`.
+This is the **public forest estate**, not a fuel or vegetation map — the forests
+the Generalitat manages, a fraction of Catalonia's forest cover. For continuous
+land cover the same service publishes `inspire:LC.LandCoverSurfaces`.
 
-## Tests
+---
+
+## Replacing the placeholders
+
+### Vulnerability
+
+`app/vulnerability.py` is a stub returning `0.5`. To replace it, change the body
+of `vulnerability(asset)` and nothing else:
+
+```python
+def vulnerability(asset: Mapping[str, Any]) -> float:
+    """asset is the row as read: asset_type, name, value, source, geometry."""
+```
+
+It is called once per feature and handed the whole row, so a model that needs
+coordinates, municipality or provenance can read them without touching a single
+caller. The return value is **clamped to 0–1 by the caller**, so a model that
+returns nonsense cannot produce a response the consumer rejects.
+
+### Value
+
+`value` is a real column defaulting to 1. Score rows with `UPDATE`, or send them
+through `POST /add_building` with a `value`. The endpoint clamps to 1–100.
+
+### Real named assets
+
+The register has none. Two routes in: `POST /add_building` for individual
+records, or a new loader. The INSPIRE service already used here publishes
+`US.Health` (5,489), `US.Education` (4,566), `US.SocialService` (4,562),
+`US.PublicOrderAndSafety` (480) and `PF.ProductionFacility` (10,719) as named
+points — `extract_forests.py` is the closest template. It does not publish
+substations, telecom towers, water plants or fuel stations; those would come
+from OSM.
+
+---
+
+## Verifying a change
+
+Nothing here needs a database except the last two.
 
 ```bash
 cd backend
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/pytest
+.venv/bin/pytest -q                       # 80 tests, ~0.5s
 ```
+
+```bash
+# The contract, end to end
+curl -s "http://localhost:5102/assets?bbox=2.78,41.69,2.84,41.74&limit=2" | python3 -m json.tool
+# expect: numberMatched 13854, two Point features, next set
+
+# Paging must not repeat rows
+python3 -c "
+import json, urllib.request
+def ids(off):
+    u = f'http://localhost:5102/assets?bbox=2.78,41.69,2.84,41.74&limit=50&offset={off}'
+    return [f['properties']['asset_id'] for f in json.load(urllib.request.urlopen(u))['features']]
+print('overlap:', len(set(ids(0)) & set(ids(50))))"        # expect: 0
+
+# Error envelope
+curl -s -w '\n%{http_code}\n' "http://localhost:5102/assets?bbox=nonsense"
+# expect: {"error":{"code":"bad_request",...}} and 400
+```
+
+```bash
+# The loader, without touching data: re-run the smallest municipality.
+# ON CONFLICT (source_id) DO NOTHING means the row count must not move.
+docker exec fireprotector-db psql -U fireprotector -d fireprotector -qtA \
+  -c "DELETE FROM protection.load_log WHERE slug='lladurs'"
+scripts/setup_db.sh --only lladurs --no-forests
+```
+
+---
+
+## Loading the data
+
+```bash
+./backend/scripts/setup_db.sh                 # everything still missing
+./backend/scripts/setup_db.sh --limit 10      # the 10 smallest pending
+./backend/scripts/setup_db.sh --only olot     # named municipalities
+./backend/scripts/setup_db.sh --workers 8     # parallelism (default 4)
+./backend/scripts/setup_db.sh --forests-only  # refresh forests, skip assets
+./backend/scripts/setup_db.sh --no-forests    # assets only
+./backend/scripts/setup_db.sh --reset         # wipe the volume, start over
+```
+
+**Point assets.** Each municipality streams from
+[datacloud.ide.cat](https://datacloud.ide.cat/geodades/inspire-edificis/)
+straight into `extract_buildings.py` and is `COPY`d in, so the 12 GB of source
+GML never touches disk. The insert and its `load_log` row share one transaction,
+making an interrupted run resumable. 680 of Catalonia's 947 municipalities
+publish building data, across 689 files (Barcelona is split by district).
+
+**Forests.** One request to the INSPIRE OGC API - Features endpoint brings all
+1,185 polygons as GeoJSON; the table is then replaced wholesale in one
+transaction, so a re-run also drops forests the source no longer lists. ~10
+seconds. GeoJSON rather than the ATOM/GML download because the GML carries only
+the harmonised INSPIRE core, without the CUP number, management plan or
+certification.
+
+**Both loaders `COPY` with `HEADER MATCH`**, so Postgres checks the CSV header
+against the staging columns. If you change a `FIELDS` list in an extractor, the
+matching staging table in `setup_db.sh` (or `02_forests.sql`) must change too —
+`HEADER MATCH` turns that into a loud error instead of silently loading values
+into the wrong columns. A test asserts the forest one
+(`test_fields_match_the_table_the_csv_is_copied_into`).
+
+### If you change the schema
+
+`db/init/*.sql` are applied **on every run** of `setup_db.sh`, in filename
+order, and must stay idempotent. `01_schema.sql` contains a migration from the
+original `building_specs` table guarded by `to_regclass(...) IS NULL → RETURN`,
+written as a single `DO` block so it either completes or does nothing.
+
+⚠️ **That migration rewrites a 4.27M-row table.** It is deliberately one
+`ALTER TABLE` — the identity column forces a rewrite, so the `asset_type`
+backfill rides along in the same pass rather than running as a separate
+`UPDATE`. Split into two steps it needs ~3 GB of disk and WAL and *will fill a
+laptop that is short of space* — this has already happened once and took the
+database down. As written it runs in ~82 seconds for ~250 MB. Check free disk
+before any migration that touches this table.
+
+---
+
+## Configuration
+
+Environment or `.env` (see `.env.example`). `.env` is gitignored.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | — | Postgres connection string (required) |
+| `ASSET_SPECS_TABLE` | `protection.asset_specs` | Point assets; `schema.table` accepted |
+| `FOREST_AREAS_TABLE` | `protection.forest_areas` | Forest polygons unioned in by `/assets` |
+| `LATITUDE_COLUMN` / `LONGITUDE_COLUMN` | `latitude` / `longitude` | Coordinate column names |
+| `ASSETS_PAGE_SIZE` | `1000` | Page size for `/assets`; also its ceiling |
+| `DEFAULT_LIMIT` / `MAX_LIMIT` | `500` / `10000` | Row caps for `/building_specs` |
+| `MAX_INSERT_ROWS` | `1000` | Max rows per `POST /add_building` |
+| `POOL_MIN_SIZE` / `POOL_MAX_SIZE` | `1` / `10` | Connection pool |
+| `CORS_ORIGINS` | `["*"]` | Browser origins |
+| `API_PORT` | `5102` | Host port in `docker-compose.yml`. **Fixed by the contract** |
+
+---
+
+## Design decisions, and why
+
+Deliberate choices that look like omissions. Please read before "fixing" one.
+
+### Why no PostGIS
+
+The stack runs `postgres:18` with no spatial extension. Coordinates are numeric
+columns, polygons are GeoJSON `jsonb`, bbox filtering is `BETWEEN`, and exact
+geometry work happens in `shapely`.
+
+Measured on this dataset: a ~10 km fire perimeter over the densest
+wildland-urban interface in Catalonia takes **~135 ms end to end** — 42 ms to
+pull 22,771 candidate buildings from 4.27M by index, 93 ms for point-in-polygon
+on all of them. The entire forest layer is 1,185 polygons / ~20 MB, which loads
+into memory in 800 ms and then answers intersection queries in 0.03 ms via an
+`STRtree`.
+
+PostGIS would buy `ST_Intersects` with a GiST index (moving polygon work into
+SQL), exact geodesic distance, and `ST_AsMVT` for vector tiles. It costs an
+image swap and a migration. **The decision is cheap to reverse** — the stored
+GeoJSON is already valid input for `ST_GeomFromGeoJSON`, so adopting it later is
+an `ALTER TABLE` plus an `UPDATE`, with no re-download and no re-parse. Revisit
+if the ranking moves into SQL, or if a much larger polygon layer (land cover) is
+loaded.
+
+### Other choices
+
+- **Surrogate `asset_id`, with `source_id` kept UNIQUE.** The generated key is
+  what the contract wanted; the localId had to stay because it is the only thing
+  that identifies a source record across reloads. Drop the unique constraint and
+  a second load duplicates every row.
+- **Forests unioned into `/assets` rather than served separately.** One call
+  gives the decision layer everything in a box. Watch the consequence: forest
+  geometry is ~17 kB against ~210 bytes for a point, so page sizes vary wildly.
+- **`value`/`source` are constants for forests.** That table has no columns for
+  them, and the forest loader replaces it wholesale on every run, so hand-set
+  values there would be wiped.
+- **`name` falls back to `'residential'`, not null.** The contract requires a
+  name on every feature.
+- **The API returns whole rows from the catalog** (`SELECT *`,
+  `fetch_table_columns`), so adding a column does not require an API change.
+- **Query parameters on `/assets` are strings.** See invariant 6.
+
+---
 
 ## Layout
 
 ```
 backend/
-├── docker-compose.yml           # db (postgres:18) + api
-├── Dockerfile                   # the API image
+├── docker-compose.yml           # db (postgres:18) + api, API on :5102
+├── Dockerfile                   # the API image; HEALTHCHECK hits /health
 ├── app/
 │   ├── main.py                  # app factory, lifespan, CORS, /health
 │   ├── config.py                # settings from env / .env
 │   ├── db.py                    # async connection pool
-│   ├── errors.py                # database errors -> HTTP status codes
-│   ├── geo.py                   # centre + size_km -> bounding box
+│   ├── errors.py                # DB errors -> status codes; global envelope
+│   ├── geo.py                   # centre+size_km -> box; parse_bbox
 │   ├── payload.py               # POST body validation (pure functions)
-│   ├── queries.py               # the SELECTs, the INSERT, column introspection
-│   ├── schemas.py               # response models
-│   ├── vulnerability.py         # STUB: replace this with the real model
+│   ├── queries.py               # the SELECTs, the INSERT, introspection
+│   ├── schemas.py               # response models, incl. the contract's
+│   ├── vulnerability.py         # STUB — replace this
 │   └── routers/
 │       ├── assets.py            # GET /assets, the contract endpoint
 │       ├── building_specs.py
 │       └── add_building.py
 ├── db/
 │   ├── init/
-│   │   ├── 01_schema.sql        # protection schema, asset_specs, load_log
+│   │   ├── 01_schema.sql        # protection schema, asset_specs, migration
 │   │   └── 02_forests.sql       # forest_areas
 │   └── import/                  # loader staging area (gitignored)
-├── data/
-│   └── municipality_slug_map.csv
-├── scripts/setup_db.sh          # one-time setup and data load
+├── data/municipality_slug_map.csv
+├── scripts/setup_db.sh          # containers + schema + both loads
 ├── extract_buildings.py         # INSPIRE building GML  -> CSV
 ├── extract_forests.py           # INSPIRE forest GeoJSON -> CSV
 └── tests/
-    ├── test_assets.py
-    ├── test_extract_forests.py
-    ├── test_geo.py
-    └── test_payload.py
+    ├── test_assets.py           # wire shape: names, ranges, parameters
+    ├── test_extract_forests.py  # value cleanup, area maths, CSV/DDL match
+    ├── test_geo.py              # box maths, bbox parsing
+    └── test_payload.py          # what POST /add_building accepts
 ```
 
-## Loading the data
+## Running the API on the host
 
-`scripts/setup_db.sh` is safe to re-run; it skips municipalities already in
-`protection.load_log`.
+Useful for a debugger; the database still comes from Docker.
 
 ```bash
-./backend/scripts/setup_db.sh                 # load everything still missing
-./backend/scripts/setup_db.sh --limit 10      # only the 10 smallest pending
-./backend/scripts/setup_db.sh --only olot     # named municipalities
-./backend/scripts/setup_db.sh --workers 8     # parallelism (default 4)
-./backend/scripts/setup_db.sh --forests-only  # refresh the forests, skip buildings
-./backend/scripts/setup_db.sh --no-forests    # buildings only
-./backend/scripts/setup_db.sh --reset         # wipe the volume and start over
+cd backend
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt   # includes the loader deps
+cp .env.example .env                            # already points at localhost
+.venv/bin/uvicorn app.main:app --reload
 ```
 
-**Point assets.** Each municipality is streamed from
-[datacloud.ide.cat](https://datacloud.ide.cat/geodades/inspire-edificis/)
-straight into `extract_buildings.py` and loaded with `COPY` into
-`protection.asset_specs`, so the 12 GB of source GML never touches the disk.
-The insert and its `load_log` row share one transaction, making an interrupted
-run resumable.
-
-680 of Catalonia's 947 municipalities publish building data, across 689 files
-(Barcelona is split by district); the other 267 publish none.
-
-**Forests.** One request to the [INSPIRE OGC API - Features
-endpoint](https://geoserveis.ide.cat/servei/catalunya/inspire/ogc/features/collections/inspire:AM.ForestManagementArea)
-of the same service brings all 1,185 polygons as GeoJSON, which
-`extract_forests.py` turns into a CSV. The table is then replaced wholesale in
-one transaction, so a re-run also drops forests the source no longer lists;
-the whole step takes about ten seconds.
-
-The GML served by [the dataset's ATOM
-feed](https://geoserveis.ide.cat/servei/catalunya/inspire-zones-subjectes-ordenacio/atom/inspire-forests-dataset.atom.xml)
-holds the same polygons but only the harmonised INSPIRE core — no CUP number,
-management plan or certification — which is why the loader reads GeoJSON here
-and GML for the buildings. Both are listed on [the dataset's metadata
-record](https://www.idee.es/csw-codsi-idee/srv/eng/catalog.search#/metadata/inspire-forests).
+`app/` is mounted into the container with `--reload`, so edits take effect
+without a rebuild. Rebuild only when `requirements.txt` changes:
+`docker compose up -d --build api`.
