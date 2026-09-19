@@ -18,13 +18,22 @@ from .grid import GridTooLarge, build_arrival_grid
 router = APIRouter(tags=["fire-spread"])
 
 
+CREDENTIAL_VARS = ("DEEPFIRE_CLIENT_ID", "DEEPFIRE_CLIENT_SECRET")
+
+
 @lru_cache(maxsize=1)
 def get_deepfire() -> DeepfireClient:
     load_dotenv()
-    try:
-        return DeepfireClient(os.environ["DEEPFIRE_CLIENT_ID"], os.environ["DEEPFIRE_CLIENT_SECRET"])
-    except KeyError as e:
-        raise HTTPException(status_code=500, detail=f"missing env var {e.args[0]}")
+    # Blank counts as missing: docker compose passes the variables through as
+    # empty strings when the host has not set them, and an empty secret would
+    # otherwise surface as an opaque 502 from Deepfire's token endpoint.
+    creds = {name: (os.environ.get(name) or "").strip() for name in CREDENTIAL_VARS}
+    missing = [name for name, value in creds.items() if not value]
+    if missing:
+        # Not cached: lru_cache only stores return values, so setting the
+        # variables and restarting the worker is enough to recover.
+        raise HTTPException(status_code=500, detail=f"missing env var {', '.join(missing)}")
+    return DeepfireClient(*(creds[name] for name in CREDENTIAL_VARS))
 
 
 @router.get("/arrival-grid")
