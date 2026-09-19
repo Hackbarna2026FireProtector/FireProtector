@@ -1,0 +1,84 @@
+# Postgres + the FastAPI service. `scripts/setup_db.sh` brings both up and
+# loads the Catalonia asset register and forests.
+#
+# The project name is pinned: Compose otherwise derives it from this file's
+# directory, and moving the file would silently point at a different (empty)
+# volume.
+name: hackbarna_fireprotector
+
+services:
+  db:
+    image: postgres:18
+    container_name: fireprotector-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fireprotector}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fireprotector}
+      POSTGRES_DB: ${POSTGRES_DB:-fireprotector}
+      # Pinned explicitly: postgres:18 moved its default data directory, and
+      # this keeps the named volume valid whichever image tag is used.
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      # Bound to loopback: the database is not exposed to the network.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      # Staging area the loader writes CSVs to and the server COPYs from.
+      - ./db/import:/import
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fireprotector} -d ${POSTGRES_DB:-fireprotector}"]
+      interval: 2s
+      timeout: 3s
+      retries: 45
+    # Tuned for one long series of bulk inserts. max_wal_size stays modest on
+    # purpose: a larger checkpoint target speeds the load up slightly but lets
+    # WAL grow by that much on disk, which is not worth it here.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - synchronous_commit=off
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fireprotector-api
+    container_name: fireprotector-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Inside the compose network the database is reachable as `db`. This
+      # overrides anything in .env, which targets localhost for running the
+      # API straight on the host instead.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fireprotector}:${POSTGRES_PASSWORD:-fireprotector}@db:5432/${POSTGRES_DB:-fireprotector}
+      ASSET_SPECS_TABLE: protection.asset_specs
+      LATITUDE_COLUMN: latitude
+      LONGITUDE_COLUMN: longitude
+      # Deepfire credentials for /fire/arrival-grid. The image carries no .env
+      # (.dockerignore drops it), so they have to arrive as environment
+      # variables; Compose fills them from backend/.env. Left unset, that one
+      # route answers 500 and the rest of the API is unaffected.
+      DEEPFIRE_CLIENT_ID: ${DEEPFIRE_CLIENT_ID:-}
+      DEEPFIRE_CLIENT_SECRET: ${DEEPFIRE_CLIENT_SECRET:-}
+    ports:
+      # 5102 is the port the asset-register contract names, so the frontend and
+      # the decision layer find the API where they expect it.
+      - "127.0.0.1:${API_PORT:-5102}:8000"
+    volumes:
+      # Code is mounted over the image copy and uvicorn reloads on change, so
+      # editing app/ or fire_spread/ does not need a rebuild.
+      - ./app:/srv/app:ro
+      - ./fire_spread:/srv/fire_spread:ro
+    command:
+      ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+volumes:
+  pgdata:

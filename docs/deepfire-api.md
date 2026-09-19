@@ -1,7 +1,8 @@
 # Deepfire API notes
 
 Working notes from exploring `docs.deepfire.co` + live testing against the real API.
-Auth/keys live in `notes.txt` (gitignore this if the repo is ever pushed).
+Credentials go in `backend/.env` as `DEEPFIRE_CLIENT_ID` / `DEEPFIRE_CLIENT_SECRET`
+(gitignored; see `backend/.env.example`).
 
 Base URLs:
 - OGC Features: `https://api.deepfire.co/ogc/features/v1/collections/<collection>/items`
@@ -96,7 +97,8 @@ Limits: 2 simulations in flight per API client.
 
 ## Using the hourly polygons as an arrival-time grid
 
-Hourly perimeters are nested (hour *h* ⊇ hour *h−1*), so a per-cell "first hour reached" raster can be derived by testing cell centres against the polygons newest→oldest. Implemented in `backend/fire_spread/grid.py` (`GET /arrival-grid`, see `README.md`). A `NO_SPREAD` result has an empty `result.features` and `burnedAreaM2` ≈ 900 (one ~30m cell) — confirms the 30m model grid.
+Hourly perimeters are nested (hour *h* ⊇ hour *h−1*), so a per-cell "first hour reached" raster can be derived by testing cell centres against the polygons newest→oldest. Implemented in `backend/fire_spread/grid.py`, served as `GET /fire/arrival-grid`
+(see `backend/fire_spread/README.md`). A `NO_SPREAD` result has an empty `result.features` and `burnedAreaM2` ≈ 900 (one ~30m cell) — confirms the 30m model grid.
 
 ## Open questions / not yet verified
 

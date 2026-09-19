@@ -4,6 +4,10 @@ info:
   description: >
     Simulates a point-ignition wildfire via Deepfire and returns a grid of
     first-arrival hours (hour each cell is first reached by the fire).
+
+    Mounted at /fire inside the FireProtector API, whose global exception
+    handlers put every error in the shared envelope below; this file describes
+    the route as it behaves there.
   version: "1.0.0"
 
 servers:
@@ -49,19 +53,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ArrivalGrid"
+        "400":
+          description: >
+            Validation error (missing or out-of-range lat/lon). FastAPI's
+            native 422 is remapped to 400 application-wide.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HTTPError"
         "422":
           description: >
-            Validation error (missing/out-of-range lat or lon), or Deepfire
-            rejected the ignition point as outside its supported simulation
-            areas (continental US, Europe, Hawaii).
+            Deepfire rejected the ignition point as outside its supported
+            simulation areas (continental US, Europe, Hawaii).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/HTTPError"
         "500":
           description: >
-            Server misconfiguration (missing Deepfire credentials) or the
-            resulting grid exceeded the maximum cell count.
+            Server misconfiguration (missing DEEPFIRE_CLIENT_ID /
+            DEEPFIRE_CLIENT_SECRET) or the resulting grid exceeded the maximum
+            cell count.
           content:
             application/json:
               schema:
@@ -131,9 +143,22 @@ components:
 
     HTTPError:
       type: object
-      properties:
-        detail:
-          type: string
-          description: Human-readable error message.
+      description: >
+        The FireProtector error envelope, installed application-wide by
+        app/errors.py. `code` is one of bad_request, upstream_error,
+        unavailable, upstream_timeout or internal_error.
       required:
-        - detail
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              description: Machine-readable error class.
+            message:
+              type: string
+              description: Human-readable error message.
