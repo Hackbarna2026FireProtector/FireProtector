@@ -1,5 +1,11 @@
-# Local Postgres for FireProtector. `scripts/setup_db.sh` brings this up and
-# loads the Catalonia building register into it.
+# Postgres + the FastAPI service. `scripts/setup_db.sh` brings both up and
+# loads the Catalonia building register.
+#
+# The project name is pinned: Compose otherwise derives it from this file's
+# directory, and moving the file would silently point at a different (empty)
+# volume.
+name: hackbarna_fireprotector
+
 services:
   db:
     image: postgres:18
@@ -37,6 +43,33 @@ services:
       - max_wal_size=1GB
       - -c
       - synchronous_commit=off
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fireprotector-api
+    container_name: fireprotector-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Inside the compose network the database is reachable as `db`. This
+      # overrides anything in .env, which targets localhost for running the
+      # API straight on the host instead.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fireprotector}:${POSTGRES_PASSWORD:-fireprotector}@db:5432/${POSTGRES_DB:-fireprotector}
+      BUILDING_SPECS_TABLE: protection.building_specs
+      LATITUDE_COLUMN: latitude
+      LONGITUDE_COLUMN: longitude
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      # Code is mounted over the image copy and uvicorn reloads on change, so
+      # editing app/ does not need a rebuild.
+      - ./app:/srv/app:ro
+    command:
+      ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 volumes:
   pgdata:

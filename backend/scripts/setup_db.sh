@@ -1,19 +1,28 @@
 #!/usr/bin/env bash
 #
-# One-time setup for the FireProtector database.
+# One-time setup for the FireProtector stack (Postgres + API, both in Docker).
 #
-#   scripts/setup_db.sh                     load everything still missing
-#   scripts/setup_db.sh --limit 10          load only the 10 smallest pending
-#   scripts/setup_db.sh --only solsona,olot load named municipalities
-#   scripts/setup_db.sh --workers 8         parallelism (default 4)
-#   scripts/setup_db.sh --reset             wipe the volume and start over
+#   backend/scripts/setup_db.sh                load everything still missing
+#   backend/scripts/setup_db.sh --limit 10     only the 10 smallest pending
+#   backend/scripts/setup_db.sh --only olot    named municipalities only
+#   backend/scripts/setup_db.sh --workers 8    parallelism (default 4)
+#   backend/scripts/setup_db.sh --forests-only refresh the forests, no buildings
+#   backend/scripts/setup_db.sh --no-forests   buildings only
+#   backend/scripts/setup_db.sh --reset        wipe the volume and start over
 #
-# Brings up a Postgres container, creates the `protection` schema, then loads
-# the INSPIRE building register for Catalonia into protection.building_specs
-# using extract_buildings.py.
+# Brings up the Postgres container, creates the `protection` schema, loads two
+# INSPIRE datasets for Catalonia into it --
+#
+#   protection.building_specs  the building register, one GML per municipality,
+#                              through extract_buildings.py
+#   protection.forest_areas    the public forests, as polygons, through
+#                              extract_forests.py
+#
+# -- then builds and starts the API container.
 #
 # Safe to re-run: municipalities already loaded are skipped, so an interrupted
-# run resumes where it stopped, and a finished one just starts the container.
+# run resumes where it stopped, and the forests are replaced wholesale, which
+# takes seconds.
 #
 # Each municipality is streamed straight from the open-data portal into the
 # parser, so the 12 GB of source GML never lands on disk -- only one small CSV
@@ -21,14 +30,19 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE=(docker compose -f "$REPO_ROOT/docker-compose.yml")
+BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE=(docker compose -f "$BACKEND_DIR/docker-compose.yml")
 
 BASE_URL="https://datacloud.ide.cat/geodades/inspire-edificis"
-SLUG_MAP="$REPO_ROOT/municipality_slug_map.csv"
-EXTRACTOR="$REPO_ROOT/extract_buildings.py"
-IMPORT_DIR="$REPO_ROOT/db/import"
-VENV="$REPO_ROOT/scripts/.venv"
+SLUG_MAP="$BACKEND_DIR/data/municipality_slug_map.csv"
+EXTRACTOR="$BACKEND_DIR/extract_buildings.py"
+# The forests come from the OGC API - Features endpoint of the same INSPIRE
+# service, in one request: 1,185 polygons, about 20 MB of GeoJSON. `limit` is
+# well above that count, and extract_forests.py refuses a capped page.
+FOREST_URL="https://geoserveis.ide.cat/servei/catalunya/inspire/ogc/features/collections/inspire:AM.ForestManagementArea/items?f=application%2Fgeo%2Bjson&limit=5000"
+FOREST_EXTRACTOR="$BACKEND_DIR/extract_forests.py"
+IMPORT_DIR="$BACKEND_DIR/db/import"
+VENV="$BACKEND_DIR/scripts/.venv"
 PYTHON="$VENV/bin/python"
 # Shared with the parallel workers via the environment; $$ only on first entry.
 STATE_DIR="${STATE_DIR:-${TMPDIR:-/tmp}/fireprotector-load.$$}"
@@ -117,6 +131,45 @@ SQL
     printf '[%4d/%4d] %-34s %9s buildings\n' "$n" "${TOTAL:-0}" "$slug" "$(echo "$rows" | tail -1)"
 }
 
+# ------------------------------------------------------------- forests ----
+
+load_forests() {
+    local csv="$IMPORT_DIR/forest_areas.csv"
+
+    info "Loading the public forests of Catalonia"
+    if ! curl -fsS --retry 3 --retry-delay 2 --max-time 600 "$FOREST_URL" \
+         | "$PYTHON" "$FOREST_EXTRACTOR" > "$csv" 2> "$STATE_DIR/forests.err"
+    then
+        warn "forests: download or parse failed -- $(tail -1 "$STATE_DIR/forests.err" 2>/dev/null)"
+        rm -f "$csv"
+        return 1
+    fi
+    chmod 644 "$csv"
+
+    # The source is one small published snapshot, so it is replaced wholesale
+    # inside a single transaction -- that also drops forests it no longer
+    # lists. DELETE rather than TRUNCATE, so readers keep seeing the previous
+    # rows until the commit. HEADER MATCH makes Postgres check the CSV header
+    # against the table's columns, so a change in extract_forests.py cannot
+    # quietly load values into the wrong columns.
+    local rows
+    if ! rows=$(psql_run <<SQL
+BEGIN;
+DELETE FROM protection.forest_areas;
+COPY protection.forest_areas FROM '/import/forest_areas.csv' WITH (FORMAT csv, HEADER MATCH);
+COMMIT;
+SELECT count(*) FROM protection.forest_areas;
+SQL
+    ); then
+        warn "forests: load failed"
+        rm -f "$csv"
+        return 1
+    fi
+
+    rm -f "$csv"
+    printf '    %s forests loaded\n' "$(echo "$rows" | tail -1)"
+}
+
 # Re-entry point for the parallel workers.
 if [[ "${1:-}" == "--load-one" ]]; then
     load_one "$2" "$3"
@@ -128,18 +181,25 @@ fi
 RESET=0
 LIMIT=0
 ONLY=""
+NO_FORESTS=0
+FORESTS_ONLY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --workers) WORKERS="$2"; shift 2 ;;
-        --limit)   LIMIT="$2"; shift 2 ;;
-        --only)    ONLY="$2"; shift 2 ;;
-        --reset)   RESET=1; shift ;;
+        --workers)      WORKERS="$2"; shift 2 ;;
+        --limit)        LIMIT="$2"; shift 2 ;;
+        --only)         ONLY="$2"; shift 2 ;;
+        --no-forests)   NO_FORESTS=1; shift ;;
+        --forests-only) FORESTS_ONLY=1; shift ;;
+        --reset)        RESET=1; shift ;;
         -h|--help)
-            sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
 done
+
+[[ "$NO_FORESTS" == "1" && "$FORESTS_ONLY" == "1" ]] \
+    && die "--no-forests and --forests-only leave nothing to load."
 
 # -------------------------------------------------------------- preflight ---
 
@@ -149,38 +209,50 @@ docker info >/dev/null 2>&1 || die "the Docker daemon is not running -- start Do
 command -v curl >/dev/null   || die "curl is not installed."
 command -v python3 >/dev/null || die "python3 is not installed."
 [[ -f "$EXTRACTOR" ]] || die "missing $EXTRACTOR"
-[[ -f "$SLUG_MAP" ]]  || die "missing $SLUG_MAP (extract_buildings.py needs it beside itself)"
+[[ -f "$SLUG_MAP" ]]  || die "missing $SLUG_MAP (extract_buildings.py reads it from data/)"
+[[ "$NO_FORESTS" == "1" || -f "$FOREST_EXTRACTOR" ]] || die "missing $FOREST_EXTRACTOR"
 
 if [[ ! -x "$PYTHON" ]]; then
     info "Creating loader virtualenv at scripts/.venv"
     python3 -m venv "$VENV"
     "$VENV/bin/pip" install --quiet --upgrade pip
-    "$VENV/bin/pip" install --quiet -r "$REPO_ROOT/scripts/requirements.txt"
+    "$VENV/bin/pip" install --quiet -r "$BACKEND_DIR/scripts/requirements.txt"
 fi
 
 mkdir -p "$IMPORT_DIR" "$STATE_DIR"
 trap 'rm -rf "$STATE_DIR"' EXIT
 
-# A full load needs roughly 2.5 GB for the database plus WAL and checkpoint
-# headroom. The GML itself is streamed and never stored.
-FREE_GB=$(df -g "$REPO_ROOT" | awk 'NR==2 {print $4}')
-if [[ "${FREE_GB:-99}" -lt 5 ]]; then
-    warn "only ${FREE_GB} GB free on this disk; a full load needs about 5 GB of headroom."
-    warn "Use --limit/--only to load a subset, or free some space first."
-    read -r -p "Continue anyway? [y/N] " reply
-    [[ "$reply" == "y" || "$reply" == "Y" ]] || die "aborted."
+# A full building load needs roughly 2.5 GB for the database plus WAL and
+# checkpoint headroom. The GML itself is streamed and never stored. The forests
+# are a hundredth of that, so --forests-only asks for far less.
+NEED_GB=5
+[[ "$FORESTS_ONLY" == "1" ]] && NEED_GB=1
+FREE_GB=$(df -g "$BACKEND_DIR" | awk 'NR==2 {print $4}')
+if [[ "${FREE_GB:-99}" -lt "$NEED_GB" ]]; then
+    warn "only ${FREE_GB} GB free on this disk; this load needs about ${NEED_GB} GB of headroom."
+    warn "Use --limit/--only/--forests-only to load less, or free some space first."
+    if [[ "${ALLOW_LOW_DISK:-0}" == "1" ]]; then
+        warn "ALLOW_LOW_DISK=1 is set; continuing anyway."
+    elif [[ -t 0 ]]; then
+        read -r -p "Continue anyway? [y/N] " reply
+        [[ "$reply" == "y" || "$reply" == "Y" ]] || die "aborted."
+    else
+        # Never block on a prompt nobody can answer (CI, pipes, nohup).
+        die "not running interactively; re-run with ALLOW_LOW_DISK=1 to proceed."
+    fi
 fi
 
 # ------------------------------------------------------------- container ----
 
 if [[ "$RESET" == "1" ]]; then
     warn "--reset deletes the database volume and every row in it."
+    [[ -t 0 ]] || die "--reset needs an interactive terminal to confirm."
     read -r -p "Type 'reset' to confirm: " reply
     [[ "$reply" == "reset" ]] || die "aborted."
     "${COMPOSE[@]}" down -v
 fi
 
-info "Starting Postgres (${POSTGRES_PORT:-5432})"
+info "Starting Postgres on port ${POSTGRES_PORT:-5432}"
 "${COMPOSE[@]}" up -d db
 
 printf '    waiting for health'
@@ -192,20 +264,27 @@ done
 [[ "${status:-}" == "healthy" ]] || { echo; die "database did not become healthy; see: ${COMPOSE[*]} logs db"; }
 echo " ok"
 
-# Idempotent, so this also upgrades a volume created before a schema change.
-info "Applying schema (protection.building_specs)"
-psql_run -f - < "$REPO_ROOT/db/init/01_schema.sql" >/dev/null
+# The container runs these on first boot only; applying them here too, in the
+# same order, upgrades a volume created before a schema change. Each file is
+# idempotent, so re-applying them costs nothing.
+info "Applying schema (protection.building_specs, protection.forest_areas)"
+for schema_file in "$BACKEND_DIR"/db/init/*.sql; do
+    psql_run -f - < "$schema_file" >/dev/null
+done
 
 # ------------------------------------------------------------- work list ----
 
-info "Fetching the municipality list from datacloud.ide.cat"
-curl -fsS --retry 3 --max-time 120 "$BASE_URL/" > "$STATE_DIR/listing.html" \
-    || die "could not reach $BASE_URL"
+if [[ "$FORESTS_ONLY" == "1" ]]; then
+    info "Skipping the building register (--forests-only)"
+else
+    info "Fetching the municipality list from datacloud.ide.cat"
+    curl -fsS --retry 3 --max-time 120 "$BASE_URL/" > "$STATE_DIR/listing.html" \
+        || die "could not reach $BASE_URL"
 
-psql_run -c "SELECT slug FROM protection.load_log" > "$STATE_DIR/loaded.txt"
+    psql_run -c "SELECT slug FROM protection.load_log" > "$STATE_DIR/loaded.txt"
 
-python3 - "$STATE_DIR/listing.html" "$SLUG_MAP" "$STATE_DIR/loaded.txt" "$ONLY" "$LIMIT" \
-    > "$STATE_DIR/work.txt" <<'PY'
+    python3 - "$STATE_DIR/listing.html" "$SLUG_MAP" "$STATE_DIR/loaded.txt" "$ONLY" "$LIMIT" \
+        > "$STATE_DIR/work.txt" <<'PY'
 import csv, re, sys
 
 listing, slug_map, loaded_file, only, limit = sys.argv[1:6]
@@ -245,18 +324,28 @@ if unknown:
           f"skipped: {', '.join(unknown[:5])}", file=sys.stderr)
 PY
 
-TOTAL=$(wc -l < "$STATE_DIR/work.txt" | tr -d ' ')
-ALREADY=$(wc -l < "$STATE_DIR/loaded.txt" | tr -d ' ')
-export TOTAL STATE_DIR IMPORT_DIR PYTHON EXTRACTOR BASE_URL PG_USER PG_DB REPO_ROOT
+    TOTAL=$(wc -l < "$STATE_DIR/work.txt" | tr -d ' ')
+    ALREADY=$(wc -l < "$STATE_DIR/loaded.txt" | tr -d ' ')
+    export TOTAL STATE_DIR IMPORT_DIR PYTHON EXTRACTOR BASE_URL PG_USER PG_DB BACKEND_DIR
 
-if [[ "$TOTAL" -eq 0 ]]; then
-    info "Nothing to load -- all $ALREADY municipalities are already in the database."
+    if [[ "$TOTAL" -eq 0 ]]; then
+        info "Nothing to load -- all $ALREADY municipalities are already in the database."
+    else
+        info "Loading $TOTAL municipalities ($ALREADY already done), $WORKERS at a time"
+        START=$(date +%s)
+        # Smallest first, so progress is visible early and a failure surfaces fast.
+        xargs -P "$WORKERS" -n 2 "$BACKEND_DIR/scripts/setup_db.sh" --load-one < "$STATE_DIR/work.txt"
+        info "Finished in $(( ($(date +%s) - START) / 60 ))m $(( ($(date +%s) - START) % 60 ))s"
+    fi
+fi
+
+# --------------------------------------------------------------- forests ----
+
+FOREST_FAILED=0
+if [[ "$NO_FORESTS" == "1" ]]; then
+    info "Skipping the forests (--no-forests)"
 else
-    info "Loading $TOTAL municipalities ($ALREADY already done), $WORKERS at a time"
-    START=$(date +%s)
-    # Smallest first, so progress is visible early and a failure surfaces fast.
-    xargs -P "$WORKERS" -n 2 "$REPO_ROOT/scripts/setup_db.sh" --load-one < "$STATE_DIR/work.txt"
-    info "Finished in $(( ($(date +%s) - START) / 60 ))m $(( ($(date +%s) - START) % 60 ))s"
+    load_forests || FOREST_FAILED=1
 fi
 
 # --------------------------------------------------------------- summary ----
@@ -267,23 +356,50 @@ if [[ -f "$STATE_DIR/failed" ]]; then
     warn "Re-run this script to retry just those."
 fi
 
+if [[ "$FOREST_FAILED" == "1" ]]; then
+    warn "the forests were not loaded; any rows already in the table are untouched."
+    warn "Retry just those with: $0 --forests-only"
+fi
+
+info "Building and starting the API container"
+"${COMPOSE[@]}" up -d --build api
+
+printf '    waiting for health'
+for _ in $(seq 1 60); do
+    api_status=$(docker inspect --format '{{.State.Health.Status}}' fireprotector-api 2>/dev/null || echo starting)
+    [[ "$api_status" == "healthy" ]] && break
+    printf '.'; sleep 2
+done
+if [[ "${api_status:-}" == "healthy" ]]; then
+    echo " ok"
+else
+    echo
+    warn "the API container is not healthy yet; check: ${COMPOSE[*]} logs api"
+fi
+
 info "Database summary"
 psql_run -c "
 SELECT 'buildings      ' || to_char(count(*), 'FM999,999,999') FROM protection.building_specs
 UNION ALL
 SELECT 'municipalities ' || to_char(count(*), 'FM999,999') FROM protection.load_log
 UNION ALL
-SELECT 'table size     ' || pg_size_pretty(pg_total_relation_size('protection.building_specs'))
+SELECT 'forests        ' || to_char(count(*), 'FM999,999') FROM protection.forest_areas
+UNION ALL
+SELECT 'forest area    ' || to_char(coalesce(sum(area_ha), 0), 'FM999,999,999') || ' ha'
+    FROM protection.forest_areas
+UNION ALL
+SELECT 'table sizes    ' || pg_size_pretty(pg_total_relation_size('protection.building_specs'))
+    || ' + ' || pg_size_pretty(pg_total_relation_size('protection.forest_areas'))
 UNION ALL
 SELECT 'database size  ' || pg_size_pretty(pg_database_size(current_database()));
 " | sed 's/^/    /'
 
 cat <<EOF
 
-Connection string for backend/.env:
-    DATABASE_URL=postgresql://$PG_USER:${POSTGRES_PASSWORD:-fireprotector}@localhost:${POSTGRES_PORT:-5432}/$PG_DB
-    BUILDING_SPECS_TABLE=protection.building_specs
+Everything is up.
+    API       http://localhost:${API_PORT:-8000}/docs
+    Postgres  postgresql://$PG_USER:${POSTGRES_PASSWORD:-fireprotector}@localhost:${POSTGRES_PORT:-5432}/$PG_DB
 
-Start the API:
-    cd backend && .venv/bin/uvicorn app.main:app --reload
+    docker compose -f backend/docker-compose.yml logs -f api
+    docker compose -f backend/docker-compose.yml down
 EOF

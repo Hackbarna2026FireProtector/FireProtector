@@ -1,36 +1,57 @@
 # FireProtector backend
 
-FastAPI service over the building register in Postgres.
+FastAPI service over the Catalonia building register and the public forests of
+Catalonia. The API and Postgres both run in Docker, defined in
+`docker-compose.yml`.
 
 ## Setup
 
-Start the database first — from the repo root:
+From the repo root:
 
 ```bash
-./scripts/setup_db.sh
+./backend/scripts/setup_db.sh
 ```
 
-Then:
+This starts Postgres, creates the `protection` schema, loads the building and
+forest data, then builds and starts the API. Everything is up when it finishes:
+
+- Interactive docs: http://localhost:8000/docs
+- Health check: http://localhost:8000/health
+
+Both ports are bound to loopback.
+
+## Day to day
+
+```bash
+cd backend
+docker compose up -d          # start (data is already in the volume)
+docker compose logs -f api    # follow API logs
+docker compose down           # stop; the volume and its data survive
+docker compose exec db psql -U fireprotector
+```
+
+`app/` is mounted into the container and uvicorn runs with `--reload`, so code
+edits take effect without a rebuild. Rebuild only when `requirements.txt`
+changes:
+
+```bash
+docker compose up -d --build api
+```
+
+### Running the API on the host instead
+
+Useful for a debugger. The database still comes from Docker.
 
 ```bash
 cd backend
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env          # already points at localhost:5432
+.venv/bin/uvicorn app.main:app --reload
 ```
 
-The defaults in `.env.example` already point at the local Docker database, so
-no editing is needed. `.env` is gitignored — keep connection strings out of
-commits.
-
-## Run
-
-```bash
-.venv/bin/uvicorn app.main:app --reload --port 8000
-```
-
-- Interactive docs: http://localhost:8000/docs
-- Health check: http://localhost:8000/health
+`.env` is gitignored — keep connection strings out of commits. The container
+ignores it and takes its settings from `docker-compose.yml`.
 
 ## `GET /building_specs`
 
@@ -145,9 +166,14 @@ All settings come from the environment or `.env` (see `.env.example`):
 | `POOL_MIN_SIZE` / `POOL_MAX_SIZE` | `1` / `10` | Connection pool sizing |
 | `CORS_ORIGINS` | `["*"]` | Browser origins allowed to call the API |
 
-## The table
+## The tables
 
-`protection.building_specs`, loaded from INSPIRE by `scripts/setup_db.sh`:
+Both are loaded from INSPIRE by `scripts/setup_db.sh`. No PostGIS is required
+anywhere: coordinates are plain numeric columns and polygons are GeoJSON.
+
+### `protection.building_specs`
+
+4,269,286 buildings.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -159,14 +185,60 @@ All settings come from the environment or `.env` (see `.env.example`):
 
 If the table is missing, both routes return **503** naming the table and
 columns they looked for. Point `BUILDING_SPECS_TABLE` / `LATITUDE_COLUMN` /
-`LONGITUDE_COLUMN` elsewhere to read a different table.
+`LONGITUDE_COLUMN` elsewhere to read a different table. The bounding-box filter
+is served by `building_specs_lat_lon_idx`.
 
-No PostGIS is required: the filter is a plain bounding box on two numeric
-columns, served by `building_specs_lat_lon_idx`.
+### `protection.forest_areas`
+
+The 1,185 public forests of Catalonia, 523,988 ha in all — the INSPIRE *Forest
+management areas* dataset (theme AM), published by the Departament
+d'Agricultura, Ramaderia, Pesca i Alimentació under CC BY 4.0.
+
+| Column | Type | Notes |
+|---|---|---|
+| `forest_id` | `text` | Primary key. INSPIRE localId, `ID.AM.forest.<n>` |
+| `name` | `text` | e.g. `OBAGA I SOLANA` |
+| `cup_code` | `text` | Number in the Catàleg de Forests d'Utilitat Pública; null for the 508 that are not catalogued |
+| `elenc_code` | `text` | Number in the Elenc de forests de titularitat pública |
+| `has_agreement` | `boolean` | Privately owned, managed by the Generalitat under an agreement (531) |
+| `has_management_plan` | `boolean` | Covered by an approved forest management plan (462) |
+| `certification` | `text` | `Sistema de Certificació PEFC` for 49 forests, else null |
+| `area_ha` | `double precision` | From the geometry, through an equal-area projection |
+| `latitude`, `longitude` | `double precision` | A point guaranteed to be **inside** the forest. Named to match `building_specs`, so the same bounding-box query serves both tables |
+| `min_latitude` … `max_longitude` | `double precision` | The forest's envelope |
+| `version_id` | `text` | INSPIRE versionId of the source feature, e.g. `20250714` |
+| `geometry` | `jsonb` | GeoJSON MultiPolygon, ETRS89 geographic, lon/lat; ~17 kB each |
+
+There is no index beyond the primary key, on purpose: at 1,185 rows a scan of
+everything but the geometry takes a fraction of a millisecond.
+
+The polygons are the expensive column, so narrow with the envelope in SQL and
+test exactly in Python:
+
+```sql
+SELECT forest_id, name, geometry
+FROM protection.forest_areas
+WHERE max_latitude  >= %(min_lat)s AND min_latitude  <= %(max_lat)s
+  AND max_longitude >= %(min_lon)s AND min_longitude <= %(max_lon)s;
+```
+
+```python
+from shapely.geometry import Point, shape
+from shapely.prepared import prep
+
+forest = prep(shape(row["geometry"]))      # jsonb arrives as a dict
+at_risk = [b for b in buildings if forest.covers(Point(b["longitude"], b["latitude"]))]
+```
+
+This is the **public forest estate**, not a vegetation or fuel map: it covers
+the forests the Generalitat manages, a fraction of Catalonia's forest cover.
+For continuous land cover the same service publishes
+`inspire:LC.LandCoverSurfaces`.
 
 ## Tests
 
 ```bash
+cd backend
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pytest
 ```
@@ -175,6 +247,8 @@ columns, served by `building_specs_lat_lon_idx`.
 
 ```
 backend/
+├── docker-compose.yml           # db (postgres:18) + api
+├── Dockerfile                   # the API image
 ├── app/
 │   ├── main.py                  # app factory, lifespan, CORS, /health
 │   ├── config.py                # settings from env / .env
@@ -187,7 +261,55 @@ backend/
 │   └── routers/
 │       ├── building_specs.py
 │       └── add_building.py
+├── db/
+│   ├── init/
+│   │   ├── 01_schema.sql        # protection schema, building_specs, load_log
+│   │   └── 02_forests.sql       # forest_areas
+│   └── import/                  # loader staging area (gitignored)
+├── data/
+│   └── municipality_slug_map.csv
+├── scripts/setup_db.sh          # one-time setup and data load
+├── extract_buildings.py         # INSPIRE building GML  -> CSV
+├── extract_forests.py           # INSPIRE forest GeoJSON -> CSV
 └── tests/
     ├── test_geo.py
     └── test_payload.py
 ```
+
+## Loading the data
+
+`scripts/setup_db.sh` is safe to re-run; it skips municipalities already in
+`protection.load_log`.
+
+```bash
+./backend/scripts/setup_db.sh                 # load everything still missing
+./backend/scripts/setup_db.sh --limit 10      # only the 10 smallest pending
+./backend/scripts/setup_db.sh --only olot     # named municipalities
+./backend/scripts/setup_db.sh --workers 8     # parallelism (default 4)
+./backend/scripts/setup_db.sh --forests-only  # refresh the forests, skip buildings
+./backend/scripts/setup_db.sh --no-forests    # buildings only
+./backend/scripts/setup_db.sh --reset         # wipe the volume and start over
+```
+
+**Buildings.** Each municipality is streamed from
+[datacloud.ide.cat](https://datacloud.ide.cat/geodades/inspire-edificis/)
+straight into `extract_buildings.py` and loaded with `COPY`, so the 12 GB of
+source GML never touches the disk. The insert and its `load_log` row share one
+transaction, making an interrupted run resumable.
+
+680 of Catalonia's 947 municipalities publish building data, across 689 files
+(Barcelona is split by district); the other 267 publish none.
+
+**Forests.** One request to the [INSPIRE OGC API - Features
+endpoint](https://geoserveis.ide.cat/servei/catalunya/inspire/ogc/features/collections/inspire:AM.ForestManagementArea)
+of the same service brings all 1,185 polygons as GeoJSON, which
+`extract_forests.py` turns into a CSV. The table is then replaced wholesale in
+one transaction, so a re-run also drops forests the source no longer lists;
+the whole step takes about ten seconds.
+
+The GML served by [the dataset's ATOM
+feed](https://geoserveis.ide.cat/servei/catalunya/inspire-zones-subjectes-ordenacio/atom/inspire-forests-dataset.atom.xml)
+holds the same polygons but only the harmonised INSPIRE core — no CUP number,
+management plan or certification — which is why the loader reads GeoJSON here
+and GML for the buildings. Both are listed on [the dataset's metadata
+record](https://www.idee.es/csw-codsi-idee/srv/eng/catalog.search#/metadata/inspire-forests).
