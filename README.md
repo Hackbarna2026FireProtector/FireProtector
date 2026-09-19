@@ -33,13 +33,17 @@ touching `backend/app/routers/assets.py` or `backend/app/schemas.py`.
 | `protection.asset_specs` | Loaded — the INSPIRE building register for Catalonia |
 | `protection.forest_areas` | Loaded — the INSPIRE public forests of Catalonia |
 | `value` (importance) | **Placeholder.** Every loaded row is `1` |
-| `vulnerability` | **Placeholder.** `app/vulnerability.py` returns `0.5` for everything |
+| `vulnerability` | **Placeholder.** A column on both tables, filled with a random number 0–1 per row |
 | Asset names | **Placeholder.** Every loaded row is `"residential"` — the source register has no names |
 
 So the API is structurally complete and the data is real, but **nothing in a
-response ranks anything yet**. Two placeholders stand between this and a
-working values-at-risk signal, and both are isolated on purpose — see
-[Replacing the placeholders](backend/README.md#replacing-the-placeholders).
+response ranks anything yet**.
+
+⚠️ `vulnerability` is **random**, which is more dangerous than a constant: it
+varies per row, so responses look ranked and a chart of it looks plausible,
+while meaning nothing. Anything built on it needs that caveat carried with it.
+Both placeholders are `UPDATE`s away from being real — see [Replacing the
+placeholders](backend/README.md#replacing-the-placeholders).
 
 ## Getting it running
 
@@ -72,8 +76,7 @@ Already set up? `cd backend && docker compose up -d`.
 ```
 backend/
 ├── app/                        # the FastAPI service
-│   ├── routers/assets.py       # GET /assets — THE CONTRACT ENDPOINT
-│   └── vulnerability.py        # STUB — replace this, nothing else changes
+│   └── routers/assets.py       # GET /assets — THE CONTRACT ENDPOINT
 ├── db/init/*.sql               # schema; applied on every setup_db.sh run
 ├── extract_buildings.py        # INSPIRE building GML  -> CSV
 ├── extract_forests.py          # INSPIRE forest GeoJSON -> CSV

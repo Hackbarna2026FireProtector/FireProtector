@@ -7,6 +7,10 @@ Implements the asset-register contract. Two things about it are worth knowing:
 * The contract has no paging, so a bare request returns the first page plus a
   `next` link. A consumer that ignores `next` reads one page and believes it
   has the whole box.
+* `value` and `vulnerability` are columns, read as stored. Nothing here scores
+  an asset.
+* Point assets only. The forest polygons in protection.forest_areas are loaded
+  and queryable, but deliberately not served through this endpoint.
 
 Every parameter is taken as a string and checked here, so FastAPI's own
 validation never fires for this route: the contract answers a bad bbox with
@@ -26,7 +30,6 @@ from ..errors import translate_db_errors
 from ..geo import BboxError, parse_bbox
 from ..queries import count_assets_in_bbox, fetch_assets_in_bbox
 from ..schemas import AssetCollection, AssetFeature, AssetProperties
-from ..vulnerability import vulnerability
 
 router = APIRouter(tags=["assets"])
 
@@ -58,11 +61,11 @@ def _positive_int(raw: str | None, name: str, default: int, minimum: int) -> int
 
 
 def _feature(row: dict[str, Any]) -> AssetFeature:
-    # Clamped, so a replacement vulnerability model cannot produce a response
-    # the consumer rejects.
-    score = min(max(float(vulnerability(row)), 0.0), 1.0)
-    # The column is 1-100 by contract; a row scored outside it is pulled back
-    # rather than failing the whole page.
+    # Both columns are clamped rather than trusted. A CHECK constraint keeps
+    # vulnerability inside 0-1 and value has no constraint at all, so this is
+    # what stops one out-of-range row failing the whole page -- and it still
+    # holds if ASSET_SPECS_TABLE is pointed at a table without the CHECK.
+    score = min(max(float(row["vulnerability"]), 0.0), 1.0)
     value = min(max(float(row["value"]), 1.0), 100.0)
 
     return AssetFeature(

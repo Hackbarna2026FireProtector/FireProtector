@@ -9,13 +9,13 @@ import pytest
 from fastapi import HTTPException
 
 from app.routers.assets import _clean_name, _feature, _positive_int
-from app.vulnerability import vulnerability
 
 ROW = {
     "wire_id": "asset-42",
     "asset_type": "shed",
     "name": "Cal Ratat",
     "value": 7,
+    "vulnerability": 0.42,
     "source": "INSPIRE",
     "geometry": {"type": "Point", "coordinates": [1.4, 41.4]},
 }
@@ -58,6 +58,7 @@ def test_feature_carries_the_rows_own_values() -> None:
     assert feature.properties.asset_id == "asset-42"
     assert feature.properties.asset_type == "shed"
     assert feature.properties.value == 7
+    assert feature.properties.vulnerability == 0.42
     assert feature.geometry == ROW["geometry"]
 
 
@@ -66,16 +67,14 @@ def test_value_is_pulled_into_the_contracts_range(stored, expected) -> None:
     assert _feature(row(value=stored)).properties.value == expected
 
 
-@pytest.mark.parametrize("returned, expected", [(-1.0, 0.0), (2.0, 1.0), (0.25, 0.25)])
-def test_vulnerability_is_clamped(monkeypatch, returned, expected) -> None:
-    """A replacement model that returns nonsense must not break the response."""
-    monkeypatch.setattr("app.routers.assets.vulnerability", lambda _: returned)
-
-    assert _feature(row()).properties.vulnerability == expected
+def test_vulnerability_comes_from_the_column() -> None:
+    assert _feature(row(vulnerability=0.42)).properties.vulnerability == 0.42
 
 
-def test_the_stub_is_inside_the_contracts_range() -> None:
-    assert 0.0 <= vulnerability(ROW) <= 1.0
+@pytest.mark.parametrize("stored, expected", [(-1.0, 0.0), (2.0, 1.0), (0.25, 0.25)])
+def test_vulnerability_is_clamped(stored, expected) -> None:
+    """A CHECK constraint keeps the column in range; this is the second line."""
+    assert _feature(row(vulnerability=stored)).properties.vulnerability == expected
 
 
 # ------------------------------------------------------------- parameters ---

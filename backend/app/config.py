@@ -20,9 +20,6 @@ class Settings(BaseSettings):
     latitude_column: str = "latitude"
     longitude_column: str = "longitude"
 
-    # The forest polygons /assets unions in alongside the point assets.
-    forest_areas_table: str = "protection.forest_areas"
-
     # Result caps for /building_specs.
     default_limit: int = 500
     max_limit: int = 10_000

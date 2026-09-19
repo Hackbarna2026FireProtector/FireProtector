@@ -22,12 +22,14 @@ paging that works.
 |---|---|---|
 | `name` | `"residential"` for every loaded row | The INSPIRE building register carries no names at all — it is a register of footprints, not of named places |
 | `value` | `1` for every loaded row | Column default. 1 means "not scored yet" |
-| `vulnerability` | `0.5` for everything | `app/vulnerability.py`, which is a stub |
+| `vulnerability` | **A random number, 0–1, per row** | The `vulnerability` column's default, `random()` |
 
-A response is therefore **structurally valid and carries no risk signal**. If
-you are here to make the tool rank things, see [Replacing the
-placeholders](#replacing-the-placeholders) — you should not need to touch the
-endpoint.
+⚠️ **`vulnerability` is random, and random data looks exactly like real data.**
+It varies per row, so a response will appear to rank assets and a chart of it
+will look plausible. It means nothing. Do not treat any ordering derived from
+it as a finding, and do not let it reach a demo as if it were a risk model
+without saying so. See [Replacing the
+placeholders](#replacing-the-placeholders).
 
 **What the asset register is not:** a register of hospitals and substations.
 It is the building footprint register, where 86% of rows have no type at all
@@ -58,8 +60,10 @@ preferences — breaking them produces wrong answers rather than errors.
    This is why the columns are `NOT NULL` with defaults, and why `_clean_name`
    falls back to `"unnamed"` rather than returning nothing.
 5. **Ranges are enforced**: `value` 1–100, `vulnerability` 0–1, `name` ≤ 120
-   characters. The endpoint clamps and truncates rather than trusting the data,
-   so one bad row cannot invalidate a whole page.
+   characters. `vulnerability` has a `CHECK` constraint holding it in range;
+   `value` has none. The endpoint clamps and truncates on top of that, so one
+   bad row cannot invalidate a whole page even if the table is swapped for one
+   without the constraint.
 6. **Errors are 400 or 500 only**, in the envelope
    `{"error": {"code", "message"}}`. FastAPI's native 422 is mapped to 400
    application-wide. This is why `/assets` takes every query parameter as a
@@ -188,6 +192,7 @@ Both tables are loaded from INSPIRE by `scripts/setup_db.sh`. No PostGIS.
 | `name` | `text` | `'residential'` for every loaded row |
 | `asset_type` | `text` | INSPIRE building nature, `'residential'` for the 3,674,190 untyped rows |
 | `value` | `numeric` | 1–100. Defaults to 1 |
+| `vulnerability` | `double precision` | 0–1, `CHECK`ed. Defaults to `random()` — **currently random for every row** |
 | `source` | `text` | Defaults to `'INSPIRE'` |
 | `latitude`, `longitude` | `double precision` | Point on the footprint, not the centroid. Serves the bbox filter |
 | `municipality_id` | `text` | 5-digit INE code. Text, because 56 Catalan municipalities have a leading zero. Kept for joins, never served |
@@ -195,8 +200,6 @@ Both tables are loaded from INSPIRE by `scripts/setup_db.sh`. No PostGIS.
 Type distribution, for calibration: `residential` 3,674,190 · `shed` 483,998 ·
 `canopy` 52,579 · `storageTank` 44,640 · `greenhouse` 8,303 · `tower` 5,575 ·
 `hospital` 1.
-
-There is **no `vulnerability` column** — it is computed per response.
 
 ### `protection.forest_areas` — 1,185 rows, 523,988 ha
 
@@ -206,7 +209,9 @@ Departament d'Agricultura, Ramaderia, Pesca i Alimentació under CC BY 4.0.
 Key columns: `forest_id` (PK, `ID.AM.forest.<n>`), `name` (real names),
 `cup_code`, `has_management_plan`, `area_ha`, `latitude`/`longitude` (a point
 guaranteed *inside* the forest), the envelope `min_latitude`…`max_longitude`,
-and `geometry` (GeoJSON `MultiPolygon`, lon/lat, ~17 kB each).
+`geometry` (GeoJSON `MultiPolygon`, lon/lat, ~17 kB each) and `vulnerability`
+(random, same as the assets — supplied by `extract_forests.py`, so it is
+reshuffled every time the table is reloaded).
 
 No index beyond the primary key: at 1,185 rows a scan of everything but the
 geometry takes a fraction of a millisecond.
@@ -238,18 +243,26 @@ land cover the same service publishes `inspire:LC.LandCoverSurfaces`.
 
 ### Vulnerability
 
-`app/vulnerability.py` is a stub returning `0.5`. To replace it, change the body
-of `vulnerability(asset)` and nothing else:
+It is a **column**, filled with `random()`. Nothing computes it at request time —
+there is no vulnerability module, and adding one would be a step backwards from
+how this is now wired.
 
-```python
-def vulnerability(asset: Mapping[str, Any]) -> float:
-    """asset is the row as read: asset_type, name, value, source, geometry."""
+To replace the placeholder, write real numbers into the column:
+
+```sql
+UPDATE protection.asset_specs SET vulnerability = 0.9 WHERE asset_type = 'shed';
+UPDATE protection.forest_areas SET vulnerability = ... ;
 ```
 
-It is called once per feature and handed the whole row, so a model that needs
-coordinates, municipality or provenance can read them without touching a single
-caller. The return value is **clamped to 0–1 by the caller**, so a model that
-returns nonsense cannot produce a response the consumer rejects.
+Both tables have the column and both are served from it. Two things to know
+before you do:
+
+- **`protection.forest_areas` is replaced wholesale on every forest load**, so
+  hand-written values there are wiped by the next `setup_db.sh` run. Put the
+  logic in `extract_forests.py` if it needs to survive.
+- **The column default is `random()`**, so rows inserted later (including via
+  `POST /add_building`) keep arriving with random values until that default is
+  changed too.
 
 ### Value
 
@@ -336,7 +349,9 @@ against the staging columns. If you change a `FIELDS` list in an extractor, the
 matching staging table in `setup_db.sh` (or `02_forests.sql`) must change too —
 `HEADER MATCH` turns that into a loud error instead of silently loading values
 into the wrong columns. A test asserts the forest one
-(`test_fields_match_the_table_the_csv_is_copied_into`).
+(`test_fields_match_the_table_the_csv_is_copied_into`) — which is also why
+`vulnerability` is the **last** column of `forest_areas`: `ALTER TABLE ... ADD
+COLUMN` appends, so the CSV had to append too.
 
 ### If you change the schema
 
@@ -413,6 +428,9 @@ loaded.
   values there would be wiped.
 - **`name` falls back to `'residential'`, not null.** The contract requires a
   name on every feature.
+- **`vulnerability` is stored, not computed.** It was briefly a stubbed module
+  called per feature; it is now a column on both tables, so every field the
+  contract requires is read from the database rather than assembled in Python.
 - **The API returns whole rows from the catalog** (`SELECT *`,
   `fetch_table_columns`), so adding a column does not require an API change.
 - **Query parameters on `/assets` are strings.** See invariant 6.
@@ -434,7 +452,6 @@ backend/
 │   ├── payload.py               # POST body validation (pure functions)
 │   ├── queries.py               # the SELECTs, the INSERT, introspection
 │   ├── schemas.py               # response models, incl. the contract's
-│   ├── vulnerability.py         # STUB — replace this
 │   └── routers/
 │       ├── assets.py            # GET /assets, the contract endpoint
 │       ├── building_specs.py

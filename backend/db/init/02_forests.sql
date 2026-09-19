@@ -39,8 +39,18 @@ CREATE TABLE IF NOT EXISTS protection.forest_areas (
     -- WGS84), lon/lat order -- ready for shapely.geometry.shape() or a map
     -- layer, without PostGIS. Roughly 17 kB per forest, so read it only when
     -- the exact boundary is needed.
-    geometry            jsonb NOT NULL
+    geometry            jsonb NOT NULL,
+    -- Susceptibility to fire damage, 0-1 per the contract, random for now.
+    -- Last on purpose: setup_db.sh COPYs this table with HEADER MATCH, so the
+    -- column order here must equal extract_forests.py's FIELDS, and an
+    -- ALTER ... ADD COLUMN on an existing table appends.
+    vulnerability       double precision NOT NULL DEFAULT random() CHECK (vulnerability BETWEEN 0 AND 1)
 );
+
+-- Stated separately so a table created before this column existed picks it up.
+ALTER TABLE protection.forest_areas
+    ADD COLUMN IF NOT EXISTS vulnerability double precision NOT NULL DEFAULT random()
+        CHECK (vulnerability BETWEEN 0 AND 1);
 
 -- No secondary indexes on purpose: at 1,185 rows a full scan of everything but
 -- the geometry is a fraction of a millisecond, and every one of them would

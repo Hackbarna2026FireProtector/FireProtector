@@ -9,7 +9,7 @@ management plan, certification) that the GeoJSON exposes.
 
 Coordinates are ETRS89 geographic (EPSG:4258), which within a metre is WGS84.
 """
-import csv, json, sys
+import csv, json, random, sys
 from math import cos, radians
 
 from shapely.geometry import Polygon, shape
@@ -24,7 +24,7 @@ FIELDS = [
     "has_agreement", "has_management_plan", "certification", "area_ha",
     "latitude", "longitude",
     "min_latitude", "max_latitude", "min_longitude", "max_longitude",
-    "version_id", "geometry",
+    "version_id", "geometry", "vulnerability",
 ]
 
 
@@ -84,6 +84,9 @@ def extract(collection):
             "max_longitude":       round(max_lon, 7),
             "version_id":          p.get("versionid"),
             "geometry":            json.dumps(feature["geometry"], separators=(",", ":")),
+            # Placeholder with the right shape, not a risk model. The column
+            # has the same default, which covers rows inserted by hand.
+            "vulnerability":       round(random.random(), 6),
         }
 
 

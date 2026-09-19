@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS protection.asset_specs (
     asset_type      text    NOT NULL DEFAULT 'residential',
     -- Relative importance, 1-100 per the contract. 1 means "not scored yet".
     value           numeric NOT NULL DEFAULT 1,
+    -- Susceptibility to fire damage, 0-1 per the contract. Currently a random
+    -- number per row: a placeholder with the right shape, not a risk model.
+    -- The CHECK is what guarantees the contract's range at the data layer.
+    vulnerability   double precision NOT NULL DEFAULT random() CHECK (vulnerability BETWEEN 0 AND 1),
     -- Provenance. The loader's rows are INSPIRE; callers may override it.
     source          text    NOT NULL DEFAULT 'INSPIRE',
     -- Point on the footprint, not the centroid. Serves the bbox filter.
@@ -77,6 +81,17 @@ CREATE TABLE IF NOT EXISTS protection.asset_specs (
     -- Text, because 56 Catalan municipalities have a leading zero.
     municipality_id text
 );
+
+-- Susceptibility to fire damage. Stated separately so a table created before
+-- this column existed picks it up.
+--
+-- ADD COLUMN with a *volatile* default is what fills it: Postgres rewrites the
+-- table once and evaluates random() per row. A nullable ADD COLUMN followed by
+-- an UPDATE would be metadata-only and then write every row a second time,
+-- leaving the table bloated to roughly twice its size until vacuum.
+ALTER TABLE protection.asset_specs
+    ADD COLUMN IF NOT EXISTS vulnerability double precision NOT NULL DEFAULT random()
+        CHECK (vulnerability BETWEEN 0 AND 1);
 
 -- Neither is known for an asset added through POST /add_building, so neither
 -- may be NOT NULL. Stated separately because a migrated table inherits NOT NULL
