@@ -11,6 +11,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY fire_spread ./fire_spread
 
 # Run as a non-root user.
 RUN useradd --create-home --uid 10001 api && chown -R api:api /srv

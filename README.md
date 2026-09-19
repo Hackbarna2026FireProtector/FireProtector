@@ -9,11 +9,15 @@ you should read it before changing anything under `backend/`.
 
 ## What this system does
 
-A fire spread forecast (produced elsewhere) describes where a fire will be in
-N minutes. This backend answers the other half of the question: **what is in
-that area that we care about.** It serves an *asset register* — fixed things
-with a location, an importance and a susceptibility to fire — over HTTP, so a
-decision layer can rank what is at risk.
+A fire spread forecast describes where a fire will be in N hours. The other
+half of the question is **what is in that area that we care about.** This
+backend serves both over HTTP, so a decision layer can rank what is at risk:
+
+- an *asset register* — fixed things with a location, an importance and a
+  susceptibility to fire — from Postgres (`GET /assets`);
+- a *fire spread forecast* — `GET /fire/arrival-grid` runs a Deepfire ELMFIRE
+  simulation from an ignition point and returns the hour the fire reaches each
+  100 m cell.
 
 ## The one thing to know first
 
@@ -30,6 +34,7 @@ touching `backend/app/routers/assets.py` or `backend/app/schemas.py`.
 |---|---|
 | `GET /assets` | Working. Serves 4,269,286 point assets. Points only — forests are not included |
 | `GET /building_specs`, `POST /add_building` | Working. Internal, not part of the contract |
+| `GET /fire/arrival-grid` | Working. Live call to Deepfire; needs `DEEPFIRE_CLIENT_ID`/`DEEPFIRE_CLIENT_SECRET` in `backend/.env`. Not part of the contract |
 | `protection.asset_specs` | Loaded — the INSPIRE building register for Catalonia |
 | `protection.forest_areas` | Loaded — the INSPIRE public forests of Catalonia. **Not served by any endpoint**; query it directly |
 | `value` (importance) | **Placeholder.** Every loaded row is `1` |
@@ -63,6 +68,7 @@ When it finishes:
 | | |
 |---|---|
 | Assets | http://localhost:5102/assets?bbox=1.0,41.6,1.6,42.0 |
+| Fire spread | http://localhost:5102/fire/arrival-grid?lat=42.42&lon=2.87 (~20 s — it waits for the simulation) |
 | API docs | http://localhost:5102/docs |
 | Postgres | `postgresql://fireprotector:fireprotector@localhost:5432/fireprotector` |
 
@@ -77,12 +83,14 @@ Already set up? `cd backend && docker compose up -d`.
 backend/
 ├── app/                        # the FastAPI service
 │   └── routers/assets.py       # GET /assets — THE CONTRACT ENDPOINT
+├── fire_spread/                # GET /fire/arrival-grid — Deepfire, no database
 ├── db/init/*.sql               # schema; applied on every setup_db.sh run
 ├── extract_buildings.py        # INSPIRE building GML  -> CSV
 ├── extract_forests.py          # INSPIRE forest GeoJSON -> CSV
 ├── scripts/setup_db.sh         # one command: containers + schema + data
-└── tests/                      # 80 tests, no database needed
+└── tests/                      # 94 tests, no database and no network needed
 frontend/
+docs/deepfire-api.md            # what the Deepfire API actually does
 archive/docs/SPEC.md            # the original hackathon brief
 ```
 
@@ -100,3 +108,7 @@ archive/docs/SPEC.md            # the original hackathon brief
   into a parser and then `COPY`d; 12 GB of source GML never lands on disk.
 - **Everything is re-runnable.** `setup_db.sh`, the schema files and both
   loaders can be run repeatedly without duplicating or corrupting data.
+- **Secrets stay out of git.** `backend/.env` is the one file holding
+  credentials, it is gitignored, and `backend/.env.example` lists what belongs
+  in it. `docker-compose.yml` passes them into the container as environment
+  variables rather than baking a `.env` into the image.

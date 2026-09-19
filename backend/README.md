@@ -2,7 +2,9 @@
 
 Asset-register API for the wildfire values-at-risk tool. FastAPI over Postgres,
 both in Docker. `GET /assets` implements a contract shared with other people's
-code; the other two routes are internal.
+code; the other two register routes are internal. `GET /fire/arrival-grid` is
+the one route that is not about the register at all — it runs a Deepfire
+fire-spread simulation and returns where the fire will be, hour by hour.
 
 Start with [Orientation](#orientation) and [Contract
 invariants](#contract-invariants). The invariants are the part that fails
@@ -15,6 +17,12 @@ quietly.
 **What is real:** the data. 4,269,286 point assets served by `GET /assets`,
 queryable by bounding box with paging that works, plus 1,185 forest polygons
 loaded alongside them. Both come from official INSPIRE sources.
+
+**The fire spread is a live call to someone else's model.** `/fire/arrival-grid`
+holds the request open while Deepfire runs an ELMFIRE simulation — usually
+under a minute, up to 20 minutes before it gives up. It needs
+`DEEPFIRE_CLIENT_ID`/`DEEPFIRE_CLIENT_SECRET`, and Deepfire only simulates the
+continental US, Europe and Hawaii. Nothing else in the API depends on it.
 
 **The forests are not served by `/assets`** — deliberately. They are in
 `protection.forest_areas`, queryable in SQL, and any consumer wanting them
@@ -151,6 +159,43 @@ Accepts a single object or a list (up to `MAX_INSERT_ROWS`). A batch is atomic.
 The body is validated against the table's real columns read from the Postgres
 catalog, so a typo returns a 400 naming the valid columns.
 
+### `GET /fire/arrival-grid` — fire spread
+
+Not part of the asset-register contract, and not backed by the database. Takes
+an ignition `lat`/`lon`, queues a 24-hour ELMFIRE point-ignition simulation at
+Deepfire, waits for it, and rasterises the hourly perimeters into 100 m cells
+of first-arrival hour.
+
+```bash
+curl "http://localhost:5102/fire/arrival-grid?lat=42.42&lon=2.87"
+```
+
+```json
+{
+  "originLat": 42.4141,
+  "originLon": 2.8633,
+  "cellDegLat": 0.000898,
+  "cellDegLon": 0.001217,
+  "arrivalHours": [[null, null, 24, 22, 23, null], [null, 23, 20, 19, 22, null]]
+}
+```
+
+`arrivalHours[row][col]`: row 0 is the **southernmost** row and col 0 the
+westernmost — the opposite vertical order from an image raster, and the origin
+is the south-west corner of cell `[0][0]`. `0` is the ignition cell, `null`
+means the fire never reached it inside 24 hours.
+
+The code lives in `fire_spread/`, beside `app/` rather than inside it: it
+speaks HTTP to Deepfire and never opens a database connection, and it is
+mountable in another FastAPI app on its own. See
+[fire_spread/README.md](fire_spread/README.md) and
+[../docs/deepfire-api.md](../docs/deepfire-api.md) — the latter records the
+Deepfire behaviour this relies on, most of which is not in Deepfire's docs.
+
+⚠️ **Two simulations in flight per API client**, imposed by Deepfire. A third
+concurrent request gets a 503. This route is not something to put behind a map
+click without queueing.
+
 ### `GET /health`
 
 `{"status", "database", "detail"}`. **The container's `HEALTHCHECK` depends on
@@ -170,8 +215,10 @@ Every route, one envelope:
 | 400 | `bad_request` | Missing/malformed `bbox`, bad `limit`/`offset`, bad column or coordinate in a POST body, constraint violation |
 | 404 | `not_found` | Unknown path |
 | 409 | `conflict` | Unique constraint violation (e.g. duplicate `source_id`) |
-| 500 | `internal_error` | Unhandled. Logged in full, reported generically — an exception string can leak connection details |
-| 503 | `unavailable` | Table missing or database unreachable |
+| 500 | `internal_error` | Unhandled. Logged in full, reported generically — an exception string can leak connection details. Also a `/fire` request with no Deepfire credentials configured |
+| 502 | `upstream_error` | Deepfire returned something unexpected |
+| 503 | `unavailable` | Table missing, database unreachable, or Deepfire's concurrency limit hit |
+| 504 | `upstream_timeout` | A Deepfire simulation did not finish in 20 minutes |
 
 Installed globally by `install_handlers()` in `app/errors.py`.
 
@@ -291,7 +338,7 @@ Nothing here needs a database except the last two.
 
 ```bash
 cd backend
-.venv/bin/pytest -q                       # 80 tests, ~0.5s
+.venv/bin/pytest -q                       # 94 tests, ~0.5s
 ```
 
 ```bash
@@ -389,6 +436,13 @@ Environment or `.env` (see `.env.example`). `.env` is gitignored.
 | `POOL_MIN_SIZE` / `POOL_MAX_SIZE` | `1` / `10` | Connection pool |
 | `CORS_ORIGINS` | `["*"]` | Browser origins |
 | `API_PORT` | `5102` | Host port in `docker-compose.yml`. **Fixed by the contract** |
+| `DEEPFIRE_CLIENT_ID` / `DEEPFIRE_CLIENT_SECRET` | — | Deepfire credentials for `/fire/arrival-grid`. Unset, that one route answers 500 |
+
+`DEEPFIRE_*` are the exception to "settings live in `app/config.py`":
+`fire_spread/` reads them straight from the environment so the package stays
+mountable outside this app. `docker-compose.yml` passes them into the
+container from `backend/.env`, because `.dockerignore` keeps `.env` out of the
+image.
 
 ---
 
@@ -449,6 +503,11 @@ loaded.
 backend/
 ├── docker-compose.yml           # db (postgres:18) + api, API on :5102
 ├── Dockerfile                   # the API image; HEALTHCHECK hits /health
+├── fire_spread/                 # GET /fire/arrival-grid — Deepfire, no database
+│   ├── router.py                # the endpoint; credentials from the environment
+│   ├── deepfire.py              # token auth, queue a sim, poll until done
+│   ├── grid.py                  # hourly perimeters -> first-arrival-hour raster
+│   └── openapi.yaml             # the route's spec, as mounted here
 ├── app/
 │   ├── main.py                  # app factory, lifespan, CORS, /health
 │   ├── config.py                # settings from env / .env
@@ -474,6 +533,7 @@ backend/
 └── tests/
     ├── test_assets.py           # wire shape: names, ranges, parameters
     ├── test_extract_forests.py  # value cleanup, area maths, CSV/DDL match
+    ├── test_fire_spread.py      # the arrival-grid maths, no network
     ├── test_geo.py              # box maths, bbox parsing
     └── test_payload.py          # what POST /add_building accepts
 ```

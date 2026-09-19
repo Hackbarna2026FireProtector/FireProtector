@@ -1,1 +1,8 @@
 .DS_Store
+.venv/
+__pycache__/
+*.pyc
+
+# Credentials never belong in the repo. backend/.env is the one the API and
+# docker compose read; see backend/.env.example for the variables.
+*.env

@@ -9,6 +9,8 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import AsyncConnectionPool
 
+from fire_spread import router as fire_spread_router
+
 from .config import Settings, get_settings
 from .db import create_pool, get_pool
 from .errors import install_handlers
@@ -38,7 +40,8 @@ def create_app() -> FastAPI:
         description=(
             "Asset register for the wildfire values-at-risk tool. GET /assets "
             "implements the asset-register contract; the other two routes are "
-            "internal."
+            "internal. GET /fire/arrival-grid runs a Deepfire fire-spread "
+            "simulation and returns the hour the fire reaches each grid cell."
         ),
         version="1.0.0",
         lifespan=lifespan,
@@ -53,6 +56,9 @@ def create_app() -> FastAPI:
     app.include_router(assets.router)
     app.include_router(building_specs.router)
     app.include_router(add_building.router)
+    # Mounted from the sibling `fire_spread` package rather than app/routers:
+    # it talks to Deepfire, not to Postgres, and stays independently mountable.
+    app.include_router(fire_spread_router, prefix="/fire")
     install_handlers(app)
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])

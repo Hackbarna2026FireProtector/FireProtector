@@ -9,3 +9,5 @@ tests/
 docker-compose.yml
 Dockerfile
 README.md
+fire_spread/README.md
+fire_spread/openapi.yaml

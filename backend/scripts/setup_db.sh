@@ -380,6 +380,15 @@ else
     warn "the API container is not healthy yet; check: ${COMPOSE[*]} logs api"
 fi
 
+# Health only covers the database half. /fire/arrival-grid needs Deepfire
+# credentials, which compose reads from backend/.env -- missing ones are not a
+# failure, they just leave that one route answering 500.
+if ! docker exec fireprotector-api sh -c '[ -n "$DEEPFIRE_CLIENT_ID" ] && [ -n "$DEEPFIRE_CLIENT_SECRET" ]' 2>/dev/null; then
+    warn "no Deepfire credentials, so GET /fire/arrival-grid will answer 500."
+    warn "Put DEEPFIRE_CLIENT_ID / DEEPFIRE_CLIENT_SECRET in $BACKEND_DIR/.env"
+    warn "(see .env.example), then: ${COMPOSE[*]} up -d api"
+fi
+
 info "Database summary"
 psql_run -c "
 SELECT 'assets         ' || to_char(count(*), 'FM999,999,999') FROM protection.asset_specs
@@ -401,6 +410,7 @@ cat <<EOF
 
 Everything is up.
     Assets    http://localhost:${API_PORT:-5102}/assets?bbox=1.0,41.6,1.6,42.0
+    Spread    http://localhost:${API_PORT:-5102}/fire/arrival-grid?lat=42.42&lon=2.87
     API docs  http://localhost:${API_PORT:-5102}/docs
     Postgres  postgresql://$PG_USER:${POSTGRES_PASSWORD:-fireprotector}@localhost:${POSTGRES_PORT:-5432}/$PG_DB
 
