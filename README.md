@@ -28,10 +28,10 @@ touching `backend/app/routers/assets.py` or `backend/app/schemas.py`.
 
 | Piece | State |
 |---|---|
-| `GET /assets` | Working. Serves 4,269,286 point assets + 1,185 forest polygons |
+| `GET /assets` | Working. Serves 4,269,286 point assets. Points only — forests are not included |
 | `GET /building_specs`, `POST /add_building` | Working. Internal, not part of the contract |
 | `protection.asset_specs` | Loaded — the INSPIRE building register for Catalonia |
-| `protection.forest_areas` | Loaded — the INSPIRE public forests of Catalonia |
+| `protection.forest_areas` | Loaded — the INSPIRE public forests of Catalonia. **Not served by any endpoint**; query it directly |
 | `value` (importance) | **Placeholder.** Every loaded row is `1` |
 | `vulnerability` | **Placeholder.** A column on both tables, filled with a random number 0–1 per row |
 | Asset names | **Placeholder.** Every loaded row is `"residential"` — the source register has no names |

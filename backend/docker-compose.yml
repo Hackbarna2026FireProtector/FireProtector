@@ -60,7 +60,6 @@ services:
       # API straight on the host instead.
       DATABASE_URL: postgresql://${POSTGRES_USER:-fireprotector}:${POSTGRES_PASSWORD:-fireprotector}@db:5432/${POSTGRES_DB:-fireprotector}
       ASSET_SPECS_TABLE: protection.asset_specs
-      FOREST_AREAS_TABLE: protection.forest_areas
       LATITUDE_COLUMN: latitude
       LONGITUDE_COLUMN: longitude
     ports:

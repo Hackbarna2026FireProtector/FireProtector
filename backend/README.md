@@ -12,9 +12,13 @@ quietly.
 
 ## Orientation
 
-**What is real:** the data. 4,269,286 point assets and 1,185 forest polygons,
-both loaded from official INSPIRE sources, queryable by bounding box with
-paging that works.
+**What is real:** the data. 4,269,286 point assets served by `GET /assets`,
+queryable by bounding box with paging that works, plus 1,185 forest polygons
+loaded alongside them. Both come from official INSPIRE sources.
+
+**The forests are not served by `/assets`** — deliberately. They are in
+`protection.forest_areas`, queryable in SQL, and any consumer wanting them
+needs a new endpoint rather than a change to this one.
 
 **What is not:** the scoring. Three fields are placeholders.
 
@@ -48,10 +52,11 @@ preferences — breaking them produces wrong answers rather than errors.
    opposite order of the `lat`/`lon` parameters `/building_specs` takes. Swap
    them and the API returns a plausible, empty, wrong answer.
 2. **`asset_id` must be unique within a response.** The consumer rejects the
-   *entire response* on a duplicate, not just the offending feature. This is why
-   ids are prefixed (`asset-<id>`, `forest-<localId>`) — the two tables have
-   separate id spaces that would otherwise collide. Union in a third source and
-   you must give it its own prefix.
+   *entire response* on a duplicate, not just the offending feature. Ids are
+   prefixed — `asset-<id>` — which keeps them string-typed as the contract
+   requires and namespaced per source. The prefix dates from when forest
+   polygons were served here too, as `forest-<localId>`; keep the scheme if you
+   ever serve a second table, because separate id spaces collide otherwise.
 3. **Paging must be totally ordered.** `ORDER BY wire_id` is what stops a page
    repeating or skipping rows under offset paging. Remove or weaken it and
    pagination silently loses assets — in a fire tool, assets in the fire's path.
@@ -84,9 +89,9 @@ They are legal because the contract's schema does not set
 
 ### `GET /assets` — the contract endpoint
 
-GeoJSON `FeatureCollection` of everything in a bounding box: point assets from
-`protection.asset_specs` and forest polygons from `protection.forest_areas`,
-unioned into one response.
+GeoJSON `FeatureCollection` of the point assets in a bounding box, from
+`protection.asset_specs`. Every geometry is a `Point`; the forest polygons are
+not included.
 
 | Parameter | Required | Notes |
 |---|---|---|
@@ -121,18 +126,11 @@ curl "http://localhost:5102/assets?bbox=2.78,41.69,2.84,41.74&limit=2"
 }
 ```
 
-Forests appear as `MultiPolygon` features with `asset_type: "forest"`, a real
-name (`"FORESTS MUNICIPALS DE LLORET DE MAR"`), and constant `value: 1` /
-`source: "INSPIRE"` — the forest table has no columns for either.
-
 `asset_type` is an **open enum**. The contract lists `hospital`, `school`,
-`substation` and so on, but our values are `residential`, `forest` and the
-INSPIRE building natures (`shed`, `canopy`, `storageTank`, `greenhouse`,
-`tower`). Consumers take their unknown-type path for effectively all of our
-data, which the contract explicitly allows.
-
-Ordering is lexical on the prefixed id, so **every point precedes every
-forest**. That is a side effect of the ordering requirement, not a feature.
+`substation` and so on, but our values are `residential` and the INSPIRE
+building natures (`shed`, `canopy`, `storageTank`, `greenhouse`, `tower`).
+Consumers take their unknown-type path for effectively all of our data, which
+the contract explicitly allows.
 
 ### `GET /building_specs` — internal
 
@@ -203,6 +201,10 @@ Type distribution, for calibration: `residential` 3,674,190 · `shed` 483,998 ·
 
 ### `protection.forest_areas` — 1,185 rows, 523,988 ha
 
+**Loaded but not served by any endpoint.** `/assets` returns point assets only.
+The data is here for the decision layer to query directly, or for a future
+endpoint of its own.
+
 The INSPIRE *Forest management areas* dataset (theme AM), published by the
 Departament d'Agricultura, Ramaderia, Pesca i Alimentació under CC BY 4.0.
 
@@ -259,7 +261,9 @@ before you do:
 
 - **`protection.forest_areas` is replaced wholesale on every forest load**, so
   hand-written values there are wiped by the next `setup_db.sh` run. Put the
-  logic in `extract_forests.py` if it needs to survive.
+  logic in `extract_forests.py` if it needs to survive. (Its `vulnerability`
+  column is currently unread by anything, since `/assets` does not serve
+  forests.)
 - **The column default is `random()`**, so rows inserted later (including via
   `POST /add_building`) keep arriving with random values until that default is
   changed too.
@@ -378,7 +382,6 @@ Environment or `.env` (see `.env.example`). `.env` is gitignored.
 |---|---|---|
 | `DATABASE_URL` | — | Postgres connection string (required) |
 | `ASSET_SPECS_TABLE` | `protection.asset_specs` | Point assets; `schema.table` accepted |
-| `FOREST_AREAS_TABLE` | `protection.forest_areas` | Forest polygons unioned in by `/assets` |
 | `LATITUDE_COLUMN` / `LONGITUDE_COLUMN` | `latitude` / `longitude` | Coordinate column names |
 | `ASSETS_PAGE_SIZE` | `1000` | Page size for `/assets`; also its ceiling |
 | `DEFAULT_LIMIT` / `MAX_LIMIT` | `500` / `10000` | Row caps for `/building_specs` |
@@ -420,9 +423,12 @@ loaded.
   what the contract wanted; the localId had to stay because it is the only thing
   that identifies a source record across reloads. Drop the unique constraint and
   a second load duplicates every row.
-- **Forests unioned into `/assets` rather than served separately.** One call
-  gives the decision layer everything in a box. Watch the consequence: forest
-  geometry is ~17 kB against ~210 bytes for a point, so page sizes vary wildly.
+- **Forests are loaded but not served by `/assets`.** They were unioned in at
+  one point and that was reversed: the contract describes fixed infrastructure,
+  forests are the fuel/hazard layer, and mixing them made page sizes wildly
+  uneven — forest geometry is ~17 kB against ~210 bytes for a point. The query
+  is a plain single-table `SELECT` again. Serving them means a new endpoint,
+  not a `UNION` here.
 - **`value`/`source` are constants for forests.** That table has no columns for
   them, and the forest loader replaces it wholesale on every run, so hand-set
   values there would be wiped.
