@@ -4,7 +4,7 @@ from math import cos, radians
 
 import pytest
 
-from app.geo import EARTH_RADIUS_KM, square_bounding_box
+from app.geo import EARTH_RADIUS_KM, BboxError, parse_bbox, square_bounding_box
 
 
 def _km_per_degree_lat() -> float:
@@ -64,3 +64,55 @@ def test_single_range_when_no_wrap() -> None:
     box = square_bounding_box(41.80, 1.25, 10.0)
 
     assert box.lon_ranges == [(box.min_longitude, box.max_longitude)]
+
+
+# --------------------------------------------------------------- parse_bbox ---
+# The contract's bbox is longitude-first, the opposite of everything above.
+
+
+def test_bbox_reads_longitude_first() -> None:
+    box = parse_bbox("1.0,41.6,1.6,42.0")
+
+    assert (box.min_longitude, box.max_longitude) == (1.0, 1.6)
+    assert (box.min_latitude, box.max_latitude) == (41.6, 42.0)
+    assert box.lon_ranges == [(1.0, 1.6)]
+
+
+def test_bbox_accepts_negative_and_integer_values() -> None:
+    box = parse_bbox("-1,-41,2.5,42")
+
+    assert (box.min_longitude, box.min_latitude) == (-1.0, -41.0)
+    assert (box.max_longitude, box.max_latitude) == (2.5, 42.0)
+
+
+@pytest.mark.parametrize(
+    "raw, message",
+    [
+        (None, "required"),
+        ("", "required"),
+        ("1.0,41.6,1.6", "malformed"),
+        ("1.0,41.6,1.6,42.0,3", "malformed"),
+        ("a,b,c,d", "malformed"),
+        # The contract's pattern admits none of these spellings.
+        ("1e2,41.6,1.6,42.0", "malformed"),
+        ("+1.0,41.6,1.6,42.0", "malformed"),
+        (" 1.0,41.6,1.6,42.0", "malformed"),
+        ("1.0, 41.6, 1.6, 42.0", "malformed"),
+        (".5,41.6,1.6,42.0", "malformed"),
+        # Ordering and range.
+        ("1.6,41.6,1.0,42.0", "minLon"),
+        ("1.0,42.0,1.6,41.6", "minLat"),
+        ("1.0,91.0,1.6,92.0", "latitude"),
+        ("-181.0,41.6,1.6,42.0", "longitude"),
+    ],
+)
+def test_bbox_rejects(raw, message: str) -> None:
+    with pytest.raises(BboxError, match=message):
+        parse_bbox(raw)
+
+
+def test_degenerate_bbox_is_allowed() -> None:
+    """A zero-area box is empty, not malformed."""
+    box = parse_bbox("1.0,41.6,1.0,41.6")
+
+    assert box.min_longitude == box.max_longitude

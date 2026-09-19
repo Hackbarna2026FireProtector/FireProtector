@@ -14,15 +14,23 @@ class Settings(BaseSettings):
     # postgresql://user:pass@ep-xxx-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=require
     database_url: str
 
-    # Where the building data lives. Kept configurable so the API does not have to
-    # change when the asset dataset is loaded under a different name.
-    building_specs_table: str = "building_specs"
+    # Where the asset data lives. Kept configurable so the API does not have to
+    # change when the dataset is loaded under a different name.
+    asset_specs_table: str = "protection.asset_specs"
     latitude_column: str = "latitude"
     longitude_column: str = "longitude"
+
+    # The forest polygons /assets unions in alongside the point assets.
+    forest_areas_table: str = "protection.forest_areas"
 
     # Result caps for /building_specs.
     default_limit: int = 500
     max_limit: int = 10_000
+
+    # Page size for /assets. The contract has no limit parameter, so a bare
+    # request returns this many features plus a `next` link; ceiling and default
+    # are the same number, so a caller cannot ask for a bigger page.
+    assets_page_size: int = 1_000
 
     # Cap on rows accepted by a single /add_building request.
     max_insert_rows: int = 1_000

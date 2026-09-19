@@ -12,10 +12,7 @@ CREATE SCHEMA IF NOT EXISTS protection;
 -- It is migrated in place rather than reloaded: the 4.27M rows in it cost
 -- about 11 minutes to fetch and parse again.
 --
--- One statement, so it either completes or does nothing. The order is chosen
--- to keep the peak disk use low on a developer laptop: the large indexes are
--- dropped before the rewrite and rebuilt afterwards, and the UPDATE runs
--- before the rewrite that compacts what it leaves behind.
+-- One statement, so it either completes or does nothing.
 -- ---------------------------------------------------------------------------
 DO $$
 BEGIN
@@ -23,31 +20,31 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Dropped before the rewrite and recreated under their new names further
+    -- down, so roughly 630 MB of index is not dragged through it.
     DROP INDEX IF EXISTS protection.building_specs_lat_lon_idx;
     DROP INDEX IF EXISTS protection.building_specs_municipality_idx;
+    ALTER TABLE protection.building_specs DROP CONSTRAINT IF EXISTS building_specs_pkey;
 
     ALTER TABLE protection.building_specs RENAME TO asset_specs;
     -- The localId stops being the key and becomes provenance.
     ALTER TABLE protection.asset_specs RENAME COLUMN building TO source_id;
     ALTER TABLE protection.asset_specs RENAME COLUMN building_type TO asset_type;
 
-    -- Constant defaults, so these are metadata-only and do not rewrite 4.27M rows.
+    -- Deliberately one ALTER TABLE. The identity column forces a full rewrite
+    -- of 4.27M rows, so the asset_type backfill rides along in the same pass
+    -- rather than running as a separate UPDATE that would write the whole
+    -- table a second time -- which needs about 3 GB of disk and WAL between
+    -- them, and will fill a laptop that is short of space.
     ALTER TABLE protection.asset_specs
-        ADD COLUMN name   text    NOT NULL DEFAULT 'residential',
-        ADD COLUMN value  numeric NOT NULL DEFAULT 1,
-        ADD COLUMN source text    NOT NULL DEFAULT 'INSPIRE';
-
-    -- The INSPIRE GML gives no buildingNature for 86% of buildings.
-    UPDATE protection.asset_specs SET asset_type = 'residential' WHERE asset_type IS NULL;
-    ALTER TABLE protection.asset_specs
+        ALTER COLUMN asset_type TYPE text USING coalesce(asset_type, 'residential'),
+        ALTER COLUMN asset_type SET NOT NULL,
         ALTER COLUMN asset_type SET DEFAULT 'residential',
-        ALTER COLUMN asset_type SET NOT NULL;
+        ADD COLUMN asset_id bigint  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        ADD COLUMN name     text    NOT NULL DEFAULT 'residential',
+        ADD COLUMN value    numeric NOT NULL DEFAULT 1,
+        ADD COLUMN source   text    NOT NULL DEFAULT 'INSPIRE';
 
-    -- Dropping the old primary key first means its index is not carried
-    -- through the rewrite that the identity column forces.
-    ALTER TABLE protection.asset_specs DROP CONSTRAINT building_specs_pkey;
-    ALTER TABLE protection.asset_specs
-        ADD COLUMN asset_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY;
     ALTER TABLE protection.asset_specs
         ADD CONSTRAINT asset_specs_source_id_key UNIQUE (source_id);
 END $$;
@@ -80,6 +77,12 @@ CREATE TABLE IF NOT EXISTS protection.asset_specs (
     -- Text, because 56 Catalan municipalities have a leading zero.
     municipality_id text
 );
+
+-- Neither is known for an asset added through POST /add_building, so neither
+-- may be NOT NULL. Stated separately because a migrated table inherits NOT NULL
+-- on both from the original building register, where every row had them.
+ALTER TABLE protection.asset_specs ALTER COLUMN source_id       DROP NOT NULL;
+ALTER TABLE protection.asset_specs ALTER COLUMN municipality_id DROP NOT NULL;
 
 -- Serves the bounding-box filter in GET /assets and GET /building_specs.
 CREATE INDEX IF NOT EXISTS asset_specs_lat_lon_idx

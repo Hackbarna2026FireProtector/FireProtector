@@ -1,4 +1,4 @@
-"""SQL for reading and writing building rows in Neon."""
+"""SQL for reading and writing asset rows."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ async def fetch_buildings_in_box(
     All columns are returned as-is, so the endpoint keeps working when the
     building dataset gains or loses attribute columns.
     """
-    table = _table_identifier(settings.building_specs_table)
+    table = _table_identifier(settings.asset_specs_table)
     lat_col = sql.Identifier(settings.latitude_column)
     lon_col = sql.Identifier(settings.longitude_column)
 
@@ -84,7 +84,7 @@ async def fetch_table_columns(conn: AsyncConnection, settings: Settings) -> dict
     Read from the catalog so the API can validate a POST body against the real
     table instead of a hard-coded idea of what a building looks like.
     """
-    qualified = _table_identifier(settings.building_specs_table).as_string(conn)
+    qualified = _table_identifier(settings.asset_specs_table).as_string(conn)
 
     async with conn.cursor() as cur:
         await cur.execute(
@@ -118,7 +118,7 @@ async def insert_buildings(
     A row that omits one of `column_order` gets DEFAULT for it, so callers can
     send partial rows without having to know the table's defaults.
     """
-    table = _table_identifier(settings.building_specs_table)
+    table = _table_identifier(settings.asset_specs_table)
 
     value_groups: list[sql.Composed] = []
     params: list[Any] = []
@@ -140,4 +140,94 @@ async def insert_buildings(
 
     async with conn.cursor() as cur:
         await cur.execute(query, params)
+        return await cur.fetchall()
+
+
+def _bbox_predicates(
+    settings: Settings, bbox: BoundingBox
+) -> tuple[sql.Composed, list[float], sql.SQL, list[float]]:
+    """WHERE clauses for the two tables /assets reads, with their parameters.
+
+    Points are tested by containment, forests by envelope overlap: a forest
+    counts as being in the box when any part of it is, not only its centre.
+    """
+    point_where = sql.SQL("{lat} BETWEEN %s AND %s AND {lon} BETWEEN %s AND %s").format(
+        lat=sql.Identifier(settings.latitude_column),
+        lon=sql.Identifier(settings.longitude_column),
+    )
+    point_params = [
+        bbox.min_latitude, bbox.max_latitude, bbox.min_longitude, bbox.max_longitude
+    ]
+
+    # Column names on the forest table are fixed by db/init/02_forests.sql.
+    forest_where = sql.SQL(
+        "max_latitude >= %s AND min_latitude <= %s "
+        "AND max_longitude >= %s AND min_longitude <= %s"
+    )
+    forest_params = [
+        bbox.min_latitude, bbox.max_latitude, bbox.min_longitude, bbox.max_longitude
+    ]
+
+    return point_where, point_params, forest_where, forest_params
+
+
+async def count_assets_in_bbox(
+    conn: AsyncConnection, settings: Settings, bbox: BoundingBox
+) -> int:
+    """How many features the box holds in total, across both tables."""
+    assets = _table_identifier(settings.asset_specs_table)
+    forests = _table_identifier(settings.forest_areas_table)
+    point_where, point_params, forest_where, forest_params = _bbox_predicates(settings, bbox)
+
+    query = sql.SQL(
+        "SELECT (SELECT count(*) FROM {assets} WHERE {point_where}) "
+        "     + (SELECT count(*) FROM {forests} WHERE {forest_where}) AS n"
+    ).format(
+        assets=assets, forests=forests, point_where=point_where, forest_where=forest_where
+    )
+
+    async with conn.cursor() as cur:
+        await cur.execute(query, point_params + forest_params)
+        row = await cur.fetchone()
+        return int(row["n"])
+
+
+async def fetch_assets_in_bbox(
+    conn: AsyncConnection,
+    settings: Settings,
+    bbox: BoundingBox,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    """One page of assets in the box: point assets and forest polygons together.
+
+    Ordered by the identifier that goes on the wire, which is what makes
+    offset paging stable -- without a total order a page can repeat or skip
+    rows. The order is lexical, so every point precedes every forest.
+    """
+    assets = _table_identifier(settings.asset_specs_table)
+    forests = _table_identifier(settings.forest_areas_table)
+    point_where, point_params, forest_where, forest_params = _bbox_predicates(settings, bbox)
+
+    query = sql.SQL(
+        "SELECT 'asset-' || asset_id AS wire_id, asset_type, name, value, source, "
+        "       jsonb_build_object('type', 'Point', 'coordinates', "
+        "                          jsonb_build_array({lon}, {lat})) AS geometry "
+        "FROM {assets} WHERE {point_where} "
+        "UNION ALL "
+        # Forests carry no value or source of their own; both are constants.
+        "SELECT 'forest-' || forest_id, 'forest', name, 1, 'INSPIRE', geometry "
+        "FROM {forests} WHERE {forest_where} "
+        "ORDER BY wire_id LIMIT %s OFFSET %s"
+    ).format(
+        assets=assets,
+        forests=forests,
+        point_where=point_where,
+        forest_where=forest_where,
+        lat=sql.Identifier(settings.latitude_column),
+        lon=sql.Identifier(settings.longitude_column),
+    )
+
+    async with conn.cursor() as cur:
+        await cur.execute(query, point_params + forest_params + [limit, offset])
         return await cur.fetchall()

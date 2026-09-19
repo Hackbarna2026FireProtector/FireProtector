@@ -13,8 +13,8 @@
 # Brings up the Postgres container, creates the `protection` schema, loads two
 # INSPIRE datasets for Catalonia into it --
 #
-#   protection.building_specs  the building register, one GML per municipality,
-#                              through extract_buildings.py
+#   protection.asset_specs     the building register as assets, one GML per
+#                              municipality, through extract_buildings.py
 #   protection.forest_areas    the public forests, as polygons, through
 #                              extract_forests.py
 #
@@ -90,22 +90,25 @@ load_one() {
     chmod 644 "$csv"
 
     # Staging table + insert + bookkeeping in one transaction, so a municipality
-    # is either fully loaded and logged, or not logged at all.
+    # is either fully loaded and logged, or not logged at all. HEADER MATCH makes
+    # Postgres check the CSV header against the staging columns, so a change in
+    # extract_buildings.py cannot quietly load values into the wrong columns.
     local rows
     if ! rows=$(psql_run <<SQL
 BEGIN;
 CREATE TEMP TABLE stage (
-    building        text,
-    building_type   text,
+    source_id       text,
+    name            text,
+    asset_type      text,
     latitude        double precision,
     longitude       double precision,
     municipality_id text
 ) ON COMMIT DROP;
-COPY stage FROM '/import/$slug.csv' WITH (FORMAT csv, HEADER true);
-INSERT INTO protection.building_specs
-    (building, building_type, latitude, longitude, municipality_id)
-SELECT building, building_type, latitude, longitude, municipality_id FROM stage
-ON CONFLICT (building) DO NOTHING;
+COPY stage FROM '/import/$slug.csv' WITH (FORMAT csv, HEADER MATCH);
+INSERT INTO protection.asset_specs
+    (source_id, name, asset_type, latitude, longitude, municipality_id)
+SELECT source_id, name, asset_type, latitude, longitude, municipality_id FROM stage
+ON CONFLICT (source_id) DO NOTHING;
 INSERT INTO protection.load_log (slug, n_rows, gml_bytes)
 VALUES ('$slug', (SELECT count(*) FROM stage), $bytes)
 ON CONFLICT (slug) DO UPDATE
@@ -267,7 +270,7 @@ echo " ok"
 # The container runs these on first boot only; applying them here too, in the
 # same order, upgrades a volume created before a schema change. Each file is
 # idempotent, so re-applying them costs nothing.
-info "Applying schema (protection.building_specs, protection.forest_areas)"
+info "Applying schema (protection.asset_specs, protection.forest_areas)"
 for schema_file in "$BACKEND_DIR"/db/init/*.sql; do
     psql_run -f - < "$schema_file" >/dev/null
 done
@@ -379,7 +382,7 @@ fi
 
 info "Database summary"
 psql_run -c "
-SELECT 'buildings      ' || to_char(count(*), 'FM999,999,999') FROM protection.building_specs
+SELECT 'assets         ' || to_char(count(*), 'FM999,999,999') FROM protection.asset_specs
 UNION ALL
 SELECT 'municipalities ' || to_char(count(*), 'FM999,999') FROM protection.load_log
 UNION ALL
@@ -388,7 +391,7 @@ UNION ALL
 SELECT 'forest area    ' || to_char(coalesce(sum(area_ha), 0), 'FM999,999,999') || ' ha'
     FROM protection.forest_areas
 UNION ALL
-SELECT 'table sizes    ' || pg_size_pretty(pg_total_relation_size('protection.building_specs'))
+SELECT 'table sizes    ' || pg_size_pretty(pg_total_relation_size('protection.asset_specs'))
     || ' + ' || pg_size_pretty(pg_total_relation_size('protection.forest_areas'))
 UNION ALL
 SELECT 'database size  ' || pg_size_pretty(pg_database_size(current_database()));
@@ -397,7 +400,8 @@ SELECT 'database size  ' || pg_size_pretty(pg_database_size(current_database()))
 cat <<EOF
 
 Everything is up.
-    API       http://localhost:${API_PORT:-8000}/docs
+    Assets    http://localhost:${API_PORT:-5102}/assets?bbox=1.0,41.6,1.6,42.0
+    API docs  http://localhost:${API_PORT:-5102}/docs
     Postgres  postgresql://$PG_USER:${POSTGRES_PASSWORD:-fireprotector}@localhost:${POSTGRES_PORT:-5432}/$PG_DB
 
     docker compose -f backend/docker-compose.yml logs -f api

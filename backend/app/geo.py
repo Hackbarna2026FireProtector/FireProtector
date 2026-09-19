@@ -1,7 +1,12 @@
-"""Geographic helpers: turn a centre point plus a size in km into a lat/lon box."""
+"""Geographic helpers: the two ways a caller can describe a box.
+
+/building_specs takes a centre and a size in km; /assets takes a bbox string.
+Both end up as a BoundingBox.
+"""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from math import cos, degrees, radians
 
@@ -57,3 +62,52 @@ def square_bounding_box(latitude: float, longitude: float, size_km: float) -> Bo
         ranges = [(min_longitude, max_longitude)]
 
     return BoundingBox(min_latitude, max_latitude, min_longitude, max_longitude, ranges)
+
+
+# The contract's own pattern, character for character: four plain decimals
+# separated by commas. It admits no spaces, no exponent form and no leading
+# plus, so neither do we -- a caller sending "1e2" or " 1.0, 41.6" has a bug
+# worth surfacing rather than guessing at.
+_BBOX = re.compile(r"^-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?,-?\d+(\.\d+)?$")
+
+_BBOX_FORM = "minLon,minLat,maxLon,maxLat in EPSG:4326 degrees, e.g. 1.0,41.6,1.6,42.0"
+
+
+class BboxError(ValueError):
+    """The bbox parameter cannot be read as a box."""
+
+
+def parse_bbox(raw: str | None) -> BoundingBox:
+    """Turn the contract's bbox string into a BoundingBox.
+
+    Note the order: longitude first, which is the opposite of the lat/lon
+    parameters /building_specs takes.
+    """
+    if raw is None or raw == "":
+        raise BboxError(f"'bbox' is required: {_BBOX_FORM}.")
+    if not _BBOX.match(raw):
+        raise BboxError(f"'bbox' is malformed: expected {_BBOX_FORM}, got {raw!r}.")
+
+    min_longitude, min_latitude, max_longitude, max_latitude = (float(v) for v in raw.split(","))
+
+    for name, value, limit in (
+        ("latitude", min_latitude, 90.0),
+        ("latitude", max_latitude, 90.0),
+        ("longitude", min_longitude, 180.0),
+        ("longitude", max_longitude, 180.0),
+    ):
+        if not -limit <= value <= limit:
+            raise BboxError(f"'bbox' {name} {value} is outside -{limit:g}..{limit:g}.")
+
+    if min_latitude > max_latitude:
+        raise BboxError(f"'bbox' minLat {min_latitude} is above maxLat {max_latitude}.")
+    if min_longitude > max_longitude:
+        raise BboxError(f"'bbox' minLon {min_longitude} is above maxLon {max_longitude}.")
+
+    return BoundingBox(
+        min_latitude=min_latitude,
+        max_latitude=max_latitude,
+        min_longitude=min_longitude,
+        max_longitude=max_longitude,
+        lon_ranges=[(min_longitude, max_longitude)],
+    )

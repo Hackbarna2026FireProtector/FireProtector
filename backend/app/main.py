@@ -1,4 +1,4 @@
-"""FireProtector backend: FastAPI service over the Neon building database."""
+"""FireProtector backend: the asset-register API over Postgres."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from .config import Settings, get_settings
 from .db import create_pool, get_pool
-from .routers import add_building, building_specs
+from .errors import install_handlers
+from .routers import add_building, assets, building_specs
 from .schemas import HealthResponse
 
 logging.basicConfig(level=logging.INFO)
@@ -34,8 +35,12 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
         title="FireProtector API",
-        description="Building data for the wildfire values-at-risk tool.",
-        version="0.1.0",
+        description=(
+            "Asset register for the wildfire values-at-risk tool. GET /assets "
+            "implements the asset-register contract; the other two routes are "
+            "internal."
+        ),
+        version="1.0.0",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -45,8 +50,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.include_router(assets.router)
     app.include_router(building_specs.router)
     app.include_router(add_building.router)
+    install_handlers(app)
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])
     async def health(

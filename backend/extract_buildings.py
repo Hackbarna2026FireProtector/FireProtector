@@ -1,5 +1,5 @@
-"""Extract building, building_type, location_lat, location_long, municipality_id
-from the INSPIRE `inspire-edificis` GML files (Catalonia, bu-core2d 4.0).
+"""Extract the INSPIRE `inspire-edificis` GML files (Catalonia, bu-core2d 4.0)
+into the CSV loaded into protection.asset_specs.
 
 The GML carries no municipality attribute -- the municipality is encoded as a
 slug inside base:localId (`ID.BU.<slug>.<uuid>`), so we join it to the INE code
@@ -14,6 +14,15 @@ BB = "{http://inspire.ec.europa.eu/schemas/bu-base/4.0}"
 BA = "{http://inspire.ec.europa.eu/schemas/base/3.3}"
 G  = "{http://www.opengis.net/gml/3.2}"
 XL = "{http://www.w3.org/1999/xlink}href"
+
+# Order matters: setup_db.sh COPYs with HEADER MATCH, so these names and this
+# order must equal the staging table it loads into.
+FIELDS = ["source_id", "name", "asset_type", "latitude", "longitude", "municipality_id"]
+
+# The register has no names at all -- it is a footprint register, not a register
+# of named places -- and no buildingNature for 86% of buildings. Both fall back
+# to the same value, which is what most untyped Catalan buildings are.
+UNNAMED = "residential"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(HERE, "data", "municipality_slug_map.csv"), encoding="utf-8") as fh:
@@ -48,10 +57,11 @@ def extract(gml_path):
         slug = local_id.split(".")[2]
 
         yield {
-            "building":        local_id,
-            "building_type":   _code(f.find(BB + "buildingNature")),
-            "location_lat":    round(pt.y, 7),
-            "location_long":   round(pt.x, 7),
+            "source_id":       local_id,
+            "name":            UNNAMED,
+            "asset_type":      _code(f.find(BB + "buildingNature")) or UNNAMED,
+            "latitude":        round(pt.y, 7),
+            "longitude":       round(pt.x, 7),
             "municipality_id": SLUG2INE[slug],
         }
 
@@ -61,9 +71,7 @@ def extract(gml_path):
 
 
 if __name__ == "__main__":
-    w = csv.DictWriter(sys.stdout, ["building", "building_type",
-                                    "location_lat", "location_long",
-                                    "municipality_id"])
+    w = csv.DictWriter(sys.stdout, FIELDS)
     w.writeheader()
     for path in sys.argv[1:]:
         for row in extract(path):
