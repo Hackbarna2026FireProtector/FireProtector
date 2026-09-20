@@ -7,14 +7,14 @@ is the command-centre UI.
 
 This file is the map. [backend/README.md](backend/README.md) is the detail, and
 you should read it before changing anything under `backend/`.
-[CONTEXT.md](CONTEXT.md) is the glossary — what a *scenario*, a *reached set*
-and *confidence* mean here, and which words not to use.
+[CONTEXT.md](CONTEXT.md) is the glossary — what a _scenario_, a _reached set_
+and _confidence_ mean here, and which words not to use.
 
 ## Team
 
 - Simon Escapa
 - Nil Macià
-- TODO: p-deruiter's name
+- Peter de Ruiter
 
 `frontend/`, `backend/app/engine/` and `backend/app/briefing/` are ported from
 [p-deruiter/fireprotector-decision-layer](https://github.com/p-deruiter/fireprotector-decision-layer)
@@ -29,12 +29,12 @@ A fire spread forecast describes where a fire will be in N hours. The other
 half of the question is **what is in that area that we care about.** This repo
 holds both halves and the judgement that joins them:
 
-- an *asset register* — fixed things with a location, an importance and a
+- an _asset register_ — fixed things with a location, an importance and a
   susceptibility to fire — from Postgres (`GET /assets`);
-- a *fire spread forecast* — `GET /fire/arrival-grid` runs a Deepfire ELMFIRE
+- a _fire spread forecast_ — `GET /fire/arrival-grid` runs a Deepfire ELMFIRE
   simulation from an ignition point and returns the hour the fire reaches each
   100 m cell;
-- a *decision layer* under `/api` — takes an ignition scenario, works out which
+- a _decision layer_ under `/api` — takes an ignition scenario, works out which
   assets the fire reaches and when, ranks them by risk, says how much that
   ranking can be trusted, and writes a briefing about it in three languages.
 
@@ -49,32 +49,32 @@ the screen.
 `GET /assets` implements a **contract shared with other people's code**: the
 frontend and the decision layer are written against it. Its request and response
 shapes are not ours to change unilaterally, and several of its rules fail
-*silently* rather than loudly when broken. Those rules are listed under
+_silently_ rather than loudly when broken. Those rules are listed under
 [Contract invariants](backend/README.md#contract-invariants) — read them before
 touching `backend/app/routers/assets.py` or `backend/app/schemas.py`.
 
 ## Current state
 
-| Piece | State |
-|---|---|
-| `GET /assets` | Working. Serves 4,269,286 point assets. Points only — forests are not included |
-| `GET /building_specs`, `POST /add_building` | Working. Internal, not part of the contract |
-| `GET /fire/arrival-grid` | Working. Live call to Deepfire; needs `DEEPFIRE_CLIENT_ID`/`DEEPFIRE_CLIENT_SECRET` in `backend/.env`. Not part of the contract |
-| `/api/*` (decision layer) | Working. Scenarios, spread contours, scoring, sensitivity, briefings. Serves recorded bundles when Deepfire is unavailable |
-| `frontend/` | Working. React + MapLibre, talks only to `/api` |
-| `protection.asset_specs` | Loaded — the INSPIRE building register for Catalonia |
-| `protection.forest_areas` | Loaded — the INSPIRE public forests of Catalonia. **Not served by any endpoint**; query it directly |
-| `value` (importance) | **Real.** Assigned from `asset_type` by `db/init/03_asset_values.sql` |
-| `vulnerability` | **Real** on `asset_specs`, from the same table. Still `random()` on `forest_areas`, which no endpoint serves |
-| Asset names | **Still a placeholder.** Every register row is `"residential"` — the source register has no names |
+| Piece                                       | State                                                                                                                           |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /assets`                               | Working. Serves 4,269,286 point assets. Points only — forests are not included                                                  |
+| `GET /building_specs`, `POST /add_building` | Working. Internal, not part of the contract                                                                                     |
+| `GET /fire/arrival-grid`                    | Working. Live call to Deepfire; needs `DEEPFIRE_CLIENT_ID`/`DEEPFIRE_CLIENT_SECRET` in `backend/.env`. Not part of the contract |
+| `/api/*` (decision layer)                   | Working. Scenarios, spread contours, scoring, sensitivity, briefings. Serves recorded bundles when Deepfire is unavailable      |
+| `frontend/`                                 | Working. React + MapLibre, talks only to `/api`                                                                                 |
+| `protection.asset_specs`                    | Loaded — the INSPIRE building register for Catalonia                                                                            |
+| `protection.forest_areas`                   | Loaded — the INSPIRE public forests of Catalonia. **Not served by any endpoint**; query it directly                             |
+| `value` (importance)                        | **Real.** Assigned from `asset_type` by `db/init/03_asset_values.sql`                                                           |
+| `vulnerability`                             | **Real** on `asset_specs`, from the same table. Still `random()` on `forest_areas`, which no endpoint serves                    |
+| Asset names                                 | **Still a placeholder.** Every register row is `"residential"` — the source register has no names                               |
 
 ### What still is not real
 
 **Nothing in the register has a name.** All 4,269,286 rows are called
 `"residential"`, including the one row typed `hospital`. `value` and
 `vulnerability` now come from the asset's type, so a ranking of the register is
-honest — but it can only ever say *how many* homes and storage tanks a fire
-reaches, never *which* ones.
+honest — but it can only ever say _how many_ homes and storage tanks a fire
+reaches, never _which_ ones.
 
 Named assets come from OpenStreetMap instead, queried live per scenario. That
 is the only source of a hospital or a school by name, and it is the one hard
@@ -89,7 +89,7 @@ renders from register rows and `/api/.../score` reports it:
 mirror answers a Catalonia query with HTTP 200 and zero results, which is
 indistinguishable from "there is no hospital here" — it does not fail, it lies.
 
-The INSPIRE register also publishes ~25,800 *named* facilities (`US.Health`,
+The INSPIRE register also publishes ~25,800 _named_ facilities (`US.Health`,
 `US.Education`, `US.SocialService`, `US.PublicOrderAndSafety`,
 `PF.ProductionFacility`) that nothing loads yet. Loading them is the way to
 drop the OpenStreetMap dependency — see [Replacing the
@@ -127,13 +127,13 @@ are skipped, so a second run takes seconds.
 
 When it finishes:
 
-| | |
-|---|---|
-| Assets | http://localhost:5102/assets?bbox=1.0,41.6,1.6,42.0 |
+|             |                                                                                                  |
+| ----------- | ------------------------------------------------------------------------------------------------ |
+| Assets      | http://localhost:5102/assets?bbox=1.0,41.6,1.6,42.0                                              |
 | Fire spread | http://localhost:5102/fire/arrival-grid?lat=42.42&lon=2.87 (~20 s — it waits for the simulation) |
-| Scenarios | http://localhost:5102/api/scenarios |
-| API docs | http://localhost:5102/docs |
-| Postgres | `postgresql://fireprotector:fireprotector@localhost:5432/fireprotector` |
+| Scenarios   | http://localhost:5102/api/scenarios                                                              |
+| API docs    | http://localhost:5102/docs                                                                       |
+| Postgres    | `postgresql://fireprotector:fireprotector@localhost:5432/fireprotector`                          |
 
 All bound to loopback. **Port 5102 is fixed by the contract** — the frontend
 looks for the API there.
@@ -146,13 +146,13 @@ Already set up? `cd backend && docker compose up -d`.
 Set `BACKEND_URL` to point somewhere else — the API running straight on the
 host on another port, say.
 
-| | |
-|---|---|
-| `npm run dev` | Vite dev server |
-| `npm run build` | typecheck + production build |
-| `npm test` | vitest |
-| `npm run e2e` | Playwright smoke test (needs both halves up) |
-| `npm run lint` | eslint |
+|                 |                                              |
+| --------------- | -------------------------------------------- |
+| `npm run dev`   | Vite dev server                              |
+| `npm run build` | typecheck + production build                 |
+| `npm test`      | vitest                                       |
+| `npm run e2e`   | Playwright smoke test (needs both halves up) |
+| `npm run lint`  | eslint                                       |
 
 The first request for a scenario with no recorded bundle runs a live Deepfire
 simulation, which takes **two to four minutes** — the 24-hour ensemble is not
