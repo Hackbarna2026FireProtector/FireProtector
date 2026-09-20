@@ -93,8 +93,7 @@ async def health(
     simulation is possible, *cached* means answers come from recorded bundles,
     and *degraded* means neither — nothing can be forecast at all.
     """
-    from fire_spread.router import CREDENTIAL_VARS
-    import os
+    from fire_spread.router import missing_credentials
 
     providers: dict[str, dict] = {}
 
@@ -110,20 +109,27 @@ async def health(
             "error": f"{exc.__class__.__name__}: {exc}",
         }
 
-    has_creds = all((os.environ.get(v) or "").strip() for v in CREDENTIAL_VARS)
+    missing = missing_credentials()
     providers["deepfire"] = {
         "source": "fire spread",
-        "available": has_creds,
-        "error": None if has_creds else "DEEPFIRE_CLIENT_ID/SECRET not set",
+        "available": not missing,
+        "error": None if not missing else f"not set: {', '.join(missing)}",
     }
     # Reported from the bundles actually built, not from a probe: a mirror can
     # answer normally and still hold the wrong extract, so the only honest
-    # signal is whether the named layer arrived for a real query.
-    osm_errors = [b.facilities_error for b in loaded_bundles() if b.facilities_error]
+    # signal is whether the named layer arrived for a real query. Before any
+    # scenario is loaded there is no evidence either way, and saying so beats
+    # reporting a health we have not observed.
+    bundles = loaded_bundles()
+    osm_errors = [b.facilities_error for b in bundles if b.facilities_error]
     providers["overpass"] = {
         "source": "named facilities",
         "available": not osm_errors,
-        "error": osm_errors[0] if osm_errors else None,
+        "error": (
+            osm_errors[0]
+            if osm_errors
+            else (None if bundles else "not queried yet — no scenario loaded")
+        ),
     }
     nebius = bool(settings.nebius_api_key)
     providers["nebius"] = {
@@ -133,7 +139,7 @@ async def health(
     }
 
     recorded = [s.scenario_id for s in list_scenarios() if has_recording(s.scenario_id)]
-    if has_creds:
+    if not missing:
         data_mode = "live"
     elif recorded:
         data_mode = "cached"
