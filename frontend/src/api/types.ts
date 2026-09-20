@@ -32,7 +32,7 @@ export interface Scenario {
 
 export interface ContourProps {
   eta_minutes: number;
-  /** Share of the Deepfire ensemble that burned this area by `eta_minutes`. */
+  /** Share of the ELMFIRE ensemble that burned this area by `eta_minutes`. */
   confidence: number;
 }
 

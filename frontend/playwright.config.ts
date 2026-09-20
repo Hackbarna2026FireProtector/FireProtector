@@ -6,7 +6,7 @@ import { defineConfig } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./e2e",
-  // A scenario with no recorded bundle runs a live Deepfire simulation, and
+  // A scenario with no recorded bundle runs a live ELMFIRE simulation, and
   // the 24-hour ensemble takes minutes rather than seconds.
   timeout: 180_000,
   retries: 1,

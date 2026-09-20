@@ -31,9 +31,9 @@ holds both halves and the judgement that joins them:
 
 - an _asset register_ — fixed things with a location, an importance and a
   susceptibility to fire — from Postgres (`GET /assets`);
-- a _fire spread forecast_ — `GET /fire/arrival-grid` runs a Deepfire ELMFIRE
-  simulation from an ignition point and returns the hour the fire reaches each
-  100 m cell;
+- a _fire spread forecast_ — `GET /fire/arrival-grid` runs a self-hosted
+  ELMFIRE ensemble from an ignition point and returns the hour the fire reaches
+  each 100 m cell;
 - a _decision layer_ under `/api` — takes an ignition scenario, works out which
   assets the fire reaches and when, ranks them by risk, says how much that
   ranking can be trusted, and writes a briefing about it in three languages.
@@ -59,8 +59,8 @@ touching `backend/app/routers/assets.py` or `backend/app/schemas.py`.
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /assets`                               | Working. Serves 4,269,286 point assets. Points only — forests are not included                                                  |
 | `GET /building_specs`, `POST /add_building` | Working. Internal, not part of the contract                                                                                     |
-| `GET /fire/arrival-grid`                    | Working. Live call to Deepfire; needs `DEEPFIRE_CLIENT_ID`/`DEEPFIRE_CLIENT_SECRET` in `backend/.env`. Not part of the contract |
-| `/api/*` (decision layer)                   | Working. Scenarios, spread contours, scoring, sensitivity, briefings. Serves recorded bundles when Deepfire is unavailable      |
+| `GET /fire/arrival-grid`                    | Working. Self-hosted ELMFIRE (no credentials); needs the static tier from `backend/scripts/setup_fire_data.sh`. Not part of the contract |
+| `/api/*` (decision layer)                   | Working. Scenarios, spread contours, scoring, sensitivity, briefings. Serves recorded bundles when the fire spread is unavailable |
 | `frontend/`                                 | Working. React + MapLibre, talks only to `/api`                                                                                 |
 | `protection.asset_specs`                    | Loaded — the INSPIRE building register for Catalonia                                                                            |
 | `protection.forest_areas`                   | Loaded — the INSPIRE public forests of Catalonia. **Not served by any endpoint**; query it directly                             |
@@ -111,18 +111,22 @@ Then open **http://localhost:5173**.
 
 `start.sh` runs both halves from one terminal: it starts Postgres, loads both
 datasets if the database is empty (~11 minutes, once), brings the API up on
-:5102, installs the UI's dependencies and serves it on :5173, tagging the API's
-log `[api]` alongside Vite's. Ctrl-C stops the UI and leaves the containers
+:5102, offers to build the fire-spread static tier if it is missing, then
+installs the UI's dependencies and serves it on :5173, tagging the API's log
+`[api]` alongside Vite's. Ctrl-C stops the UI and leaves the containers
 running, so the next start takes seconds. `./start.sh --help` lists the rest:
 
 | | |
-| ------------------------------------ | --------------------------------------------------------- |
-| `./start.sh --prod`                  | production build of the UI instead of the dev server      |
-| `./start.sh --setup`                 | run the loader even when the register is already there    |
-| `./start.sh --setup -- --limit 10`   | ... with everything after `--` passed to `setup_db.sh`    |
-| `./start.sh --no-migrate`            | skip re-applying `db/init/*.sql` (~15 s faster)           |
-| `./start.sh --no-api-logs`           | leave the API's log out of this terminal                  |
-| `./start.sh --down`                  | stop the containers when the script exits                 |
+| ------------------------------------ | ----------------------------------------------------------- |
+| `./start.sh --prod`                  | production build of the UI instead of the dev server        |
+| `./start.sh --setup`                 | run the loader even when the register is already there      |
+| `./start.sh --setup -- --limit 10`   | ... with everything after `--` passed to `setup_db.sh`      |
+| `./start.sh --fire-data`             | build the fire-spread tier even when it is already there    |
+| `./start.sh --fire-data -- --res 30` | ... with everything after `--` passed to `setup_fire_data.sh` |
+| `./start.sh --no-fire-data`          | leave the tier alone, and do not ask about it               |
+| `./start.sh --no-migrate`            | skip re-applying `db/init/*.sql` (~15 s faster)             |
+| `./start.sh --no-api-logs`           | leave the API's log out of this terminal                    |
+| `./start.sh --down`                  | stop the containers when the script exits                   |
 
 Each half still runs on its own, which is what `start.sh` does for you:
 
@@ -130,14 +134,21 @@ Each half still runs on its own, which is what `start.sh` does for you:
 # 1. backend — Postgres, the schema, both datasets, then the API on :5102
 ./backend/scripts/setup_db.sh
 
-# 2. frontend — the UI on :5173, proxying to :5102
+# 2. fire spread — the ELMFIRE static tier, optional; see below
+./backend/scripts/setup_fire_data.sh
+
+# 3. frontend — the UI on :5173, proxying to :5102
 cd frontend && npm install && npm run dev
 ```
 
-`backend/.env` is optional. Without `DEEPFIRE_CLIENT_ID`/`DEEPFIRE_CLIENT_SECRET`
-the app still runs: it serves the scenario bundles recorded under
-`backend/data/bundles/`, which are committed. With them, it can simulate new
-ignitions. `setup_db.sh` says so on its way past.
+`backend/.env` is optional, and so is the fire-spread static tier: without it
+the app still runs, serving the scenario bundles recorded under
+`backend/data/bundles/`, which are committed. To simulate new ignitions (and
+`GET /fire/arrival-grid`) it has to be built once — ~3 GB of open Catalan data,
+10–30 minutes. `start.sh` asks about it on a run where it is missing, or
+`./start.sh --fire-data` builds it outright; see `backend/README.md` for what
+goes into it. No credentials are needed: the fire spread is a self-hosted
+ELMFIRE pipeline.
 
 ### The backend, in more detail
 
@@ -175,11 +186,12 @@ host on another port, say.
 | `npm run e2e`   | Playwright smoke test (needs both halves up) |
 | `npm run lint`  | eslint                                       |
 
-The first request for a scenario with no recorded bundle runs a live Deepfire
-simulation, which takes **two to four minutes** — the 24-hour ensemble is not
-quick. After that it is instant, and the result is written to
-`backend/data/bundles/`. Those recordings are committed, so **the UI works with
-no Deepfire credentials at all**; delete one to force a fresh simulation.
+The first request for a scenario with no recorded bundle runs a live ELMFIRE
+ensemble in-process (about a minute; it needs the static tier from
+`backend/scripts/setup_fire_data.sh`). After that it is instant, and the result
+is written to `backend/data/bundles/`. Those recordings are committed, so **the
+UI works without the static tier at all**; delete one to force a fresh
+simulation.
 
 ### Running the tests
 
@@ -207,7 +219,7 @@ backend/
 │   ├── briefing/               # LLM + grounding validator        (ported)
 │   ├── providers/osm_assets.py # named facilities from Overpass
 │   └── data/                   # scenarios.json, asset_types.yaml
-├── fire_spread/                # Deepfire client + arrival-grid rasteriser
+├── fire_spread/                # self-hosted ELMFIRE pipeline (modes, weather, arrival grid)
 ├── db/init/*.sql               # schema; applied on every setup_db.sh run
 ├── data/bundles/*.json         # recorded scenarios — the app runs off these
 ├── extract_buildings.py        # INSPIRE building GML  -> CSV
@@ -222,7 +234,8 @@ frontend/src/
 └── components/                 # ranked list, controls, charts, briefing
 CONTEXT.md                      # the glossary
 DECISIONS.md                    # what was decided and how to change it
-docs/deepfire-api.md            # what the Deepfire API actually does
+docs/deepfire-api.md            # the Deepfire API (replaced by fire_spread/; kept for reference)
+docs/elmfire-pipe-assessment.md # the ELMFIRE pipeline: inputs, tuning, base-vs-tuned evaluation
 archive/docs/SPEC.md            # the original hackathon brief
 ```
 
