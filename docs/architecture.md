@@ -19,17 +19,19 @@ flowchart LR
     subgraph Data["Data and external services"]
         PG[("Postgres: asset register + forests")]
         Rec[("Recorded bundles JSON")]
-        Deepfire["Deepfire ELMFIRE simulation"]
+        Elmfire["fire_spread: self-hosted ELMFIRE pipeline"]
         OSM["OpenStreetMap Overpass"]
+        Meteo["Open-Meteo forecast / ensemble"]
         LLM["Nebius LLM"]
     end
 
     UI -->|"HTTP /api (Vite proxy)"| API
     API -->|"get bundle"| Bundle
     Bundle -->|"read/write"| Rec
-    Bundle -->|"simulate ignition (no recording)"| Deepfire
+    Bundle -->|"simulate ignition (no recording)"| Elmfire
     Bundle -->|"reached-area asset query"| PG
     Bundle -->|"named facilities"| OSM
+    Elmfire -->|"weather"| Meteo
     API -->|"score / sensitivity"| Engine
     API -->|"briefing facts"| Brief
     Brief -->|"chat completions"| LLM
@@ -39,7 +41,7 @@ flowchart LR
 The UI only talks to `/api`. Each route asks for the scenario's *bundle*: the
 fire-spread forecast, the reached assets and the exposure join. A bundle comes
 from memory, then from a recorded JSON file (`backend/data/bundles/`). Only if
-neither exists does it run a live Deepfire simulation (minutes), pull register
+neither exists does it run a live ELMFIRE simulation (minutes), pull register
 assets from Postgres and named facilities from OpenStreetMap, and record the
 result. The engine ranks assets and tests how stable the ranking is. The
 briefing service turns the top results into a trilingual briefing via the LLM,
@@ -49,6 +51,7 @@ Notes:
 
 - `GET /assets` is the shared contract endpoint; it reads Postgres directly and
   is separate from the decision flow.
-- `GET /fire/arrival-grid` (Deepfire exposed directly) is omitted for brevity.
+- `GET /fire/arrival-grid` (the ELMFIRE pipeline exposed directly) is omitted
+  for brevity.
 - The template fallback is inferred from `briefing/templates.py` sitting beside
   `llm.py`.
