@@ -111,18 +111,22 @@ Then open **http://localhost:5173**.
 
 `start.sh` runs both halves from one terminal: it starts Postgres, loads both
 datasets if the database is empty (~11 minutes, once), brings the API up on
-:5102, installs the UI's dependencies and serves it on :5173, tagging the API's
-log `[api]` alongside Vite's. Ctrl-C stops the UI and leaves the containers
+:5102, offers to build the fire-spread static tier if it is missing, then
+installs the UI's dependencies and serves it on :5173, tagging the API's log
+`[api]` alongside Vite's. Ctrl-C stops the UI and leaves the containers
 running, so the next start takes seconds. `./start.sh --help` lists the rest:
 
 | | |
-| ------------------------------------ | --------------------------------------------------------- |
-| `./start.sh --prod`                  | production build of the UI instead of the dev server      |
-| `./start.sh --setup`                 | run the loader even when the register is already there    |
-| `./start.sh --setup -- --limit 10`   | ... with everything after `--` passed to `setup_db.sh`    |
-| `./start.sh --no-migrate`            | skip re-applying `db/init/*.sql` (~15 s faster)           |
-| `./start.sh --no-api-logs`           | leave the API's log out of this terminal                  |
-| `./start.sh --down`                  | stop the containers when the script exits                 |
+| ------------------------------------ | ----------------------------------------------------------- |
+| `./start.sh --prod`                  | production build of the UI instead of the dev server        |
+| `./start.sh --setup`                 | run the loader even when the register is already there      |
+| `./start.sh --setup -- --limit 10`   | ... with everything after `--` passed to `setup_db.sh`      |
+| `./start.sh --fire-data`             | build the fire-spread tier even when it is already there    |
+| `./start.sh --fire-data -- --res 30` | ... with everything after `--` passed to `setup_fire_data.sh` |
+| `./start.sh --no-fire-data`          | leave the tier alone, and do not ask about it               |
+| `./start.sh --no-migrate`            | skip re-applying `db/init/*.sql` (~15 s faster)             |
+| `./start.sh --no-api-logs`           | leave the API's log out of this terminal                    |
+| `./start.sh --down`                  | stop the containers when the script exits                   |
 
 Each half still runs on its own, which is what `start.sh` does for you:
 
@@ -130,17 +134,21 @@ Each half still runs on its own, which is what `start.sh` does for you:
 # 1. backend — Postgres, the schema, both datasets, then the API on :5102
 ./backend/scripts/setup_db.sh
 
-# 2. frontend — the UI on :5173, proxying to :5102
+# 2. fire spread — the ELMFIRE static tier, optional; see below
+./backend/scripts/setup_fire_data.sh
+
+# 3. frontend — the UI on :5173, proxying to :5102
 cd frontend && npm install && npm run dev
 ```
 
 `backend/.env` is optional, and so is the fire-spread static tier: without it
 the app still runs, serving the scenario bundles recorded under
 `backend/data/bundles/`, which are committed. To simulate new ignitions (and
-`GET /fire/arrival-grid`), build the tier once with
-`./backend/scripts/setup_fire_data.sh` (~3 GB of open Catalan data; see
-`backend/README.md`). No credentials are needed: the fire spread is a
-self-hosted ELMFIRE pipeline.
+`GET /fire/arrival-grid`) it has to be built once — ~3 GB of open Catalan data,
+10–30 minutes. `start.sh` asks about it on a run where it is missing, or
+`./start.sh --fire-data` builds it outright; see `backend/README.md` for what
+goes into it. No credentials are needed: the fire spread is a self-hosted
+ELMFIRE pipeline.
 
 ### The backend, in more detail
 
