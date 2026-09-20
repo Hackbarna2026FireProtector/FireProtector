@@ -36,6 +36,12 @@ paths:
         = one ELMFIRE ensemble run. Concurrency is limited; a 503 means retry later.
         The grid is cropped to the burned extent (plus a small margin) so its size
         depends on how far the fire spreads.
+
+        By default the response is the original contract of this route
+        (LegacyArrivalGrid: originLat, originLon, cellDegLat, cellDegLon, arrivalHours
+        at 100 m cells), so existing consumers see no change. detail=true returns the
+        full ArrivalGrid (minute-level arrival, P10/P90, burn probability, weather,
+        physics); debug=true implies it.
       operationId: arrivalGrid
       parameters:
         - name: lat
@@ -85,13 +91,32 @@ paths:
           required: false
           description: Pipeline mode for this run; default the server's PIPELINE_MODE.
           schema: { $ref: "#/components/schemas/PipelineMode" }
+        - name: cellSizeM
+          in: query
+          required: false
+          description: >
+            Cell size of the response grid in metres. The simulation always runs at the
+            static tier's native resolution (50 m); the output is resampled to this.
+          schema: { type: number, minimum: 30, maximum: 1000, default: 100 }
+        - name: detail
+          in: query
+          required: false
+          description: Return the full ArrivalGrid instead of the legacy five-key shape.
+          schema: { type: boolean, default: false }
         - name: debug
           in: query
           required: false
-          description: Include run directory, timings and ELMFIRE stdout tail.
+          description: Include run directory, timings and ELMFIRE stdout tail (implies detail).
           schema: { type: boolean, default: false }
       responses:
-        "200": { $ref: "#/components/responses/ArrivalGridOK" }
+        "200":
+          description: Arrival grid computed successfully.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/LegacyArrivalGrid"
+                  - $ref: "#/components/schemas/ArrivalGrid"
         "422": { $ref: "#/components/responses/InvalidFireState" }
         "500": { $ref: "#/components/responses/ElmfireFailed" }
         "502": { $ref: "#/components/responses/WeatherFailed" }
@@ -238,6 +263,7 @@ components:
         seed: { type: integer, minimum: 1 }
         spotting: { type: boolean }
         mode: { $ref: "#/components/schemas/PipelineMode" }
+        cellSizeM: { type: number, minimum: 30, maximum: 1000, default: 100, description: Cell size of the response grid (m). }
         debug: { type: boolean, default: false }
 
     NullableIntGrid:
@@ -257,6 +283,28 @@ components:
           type: [number, "null"]
           minimum: 0
 
+    LegacyArrivalGrid:
+      type: object
+      description: >
+        The default GET response and the contract of the original (Deepfire-backed)
+        route: a regular lat/lon grid anchored at its south-west corner, rows S->N,
+        columns W->E, 100 m cells by default. arrivalHours[row][col] is the hour the
+        ensemble median first reaches the cell (0 = ignition); null = not reached
+        within the horizon or outside data coverage.
+      required: [originLat, originLon, cellDegLat, cellDegLon, arrivalHours]
+      properties:
+        originLat: { type: number }
+        originLon: { type: number }
+        cellDegLat: { type: number }
+        cellDegLon: { type: number }
+        arrivalHours:
+          type: array
+          items:
+            type: array
+            items:
+              type: [integer, "null"]
+              minimum: 0
+
     ArrivalGrid:
       type: object
       description: >
@@ -264,6 +312,7 @@ components:
         covers [originLon + col*cellDegLon, +cellDegLon) x [originLat + row*cellDegLat,
         +cellDegLat). The ignition point sits at a cell centre. null = no ensemble
         member reached the cell within the horizon, or the cell is outside data coverage.
+        Returned by POST, and by GET with detail=true.
       required:
         - originLat
         - originLon

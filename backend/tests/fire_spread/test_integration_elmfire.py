@@ -188,3 +188,30 @@ async def test_both_modes_run(tmp_path):
         assert g.debug.timings["elmfire_s"] > 0
     assert out["base"].physics["diurnalAdjustment"] is False and out["tuned"].physics["diurnalAdjustment"] is True
     assert out["base"].arrivalMinutes != out["tuned"].arrivalMinutes
+
+
+async def test_legacy_output_resolution_and_perimeters(tmp_path):
+    """The default GET answers 100 m cells resampled from the 50 m simulation, and the
+    decision layer's hourly perimeters nest around the ignition."""
+    from fire_spread.aggregate import M_PER_DEG_LAT
+    from fire_spread.compat import hourly_perimeters
+    from shapely.geometry import Point
+
+    start = datetime(2026, 8, 1, 13, 0, tzinfo=timezone.utc)
+    req = SimulationRequest(Ignition(LAT, LON), duration_hours=2, ensemble_members=2, seed=8, start_time=start)
+    native = await _pipeline(tmp_path).run(req)
+    coarse = await _pipeline(tmp_path).run(SimulationRequest(
+        Ignition(LAT, LON), duration_hours=2, ensemble_members=2, seed=8, start_time=start, output_cell_m=100.0))
+    assert native.cellSizeM == 50.0 and coarse.cellSizeM == 100.0
+    assert coarse.cellDegLat == pytest.approx(100.0 / M_PER_DEG_LAT)
+    assert len(coarse.arrivalHours) < len(native.arrivalHours)
+    r, c = _ign_rc(coarse)
+    assert coarse.arrivalHours[r][c] == 0
+    burned = lambda g: sum(v is not None for row in g.arrivalHours for v in row) * g.cellSizeM ** 2  # noqa: E731
+    assert burned(coarse) == pytest.approx(burned(native), rel=0.15)  # same fire, coarser cells
+
+    perims = hourly_perimeters(native)
+    hours = [h for h, p, _ in perims if p == 1.0]
+    assert hours == [1, 2]
+    h1, h2 = (g for _, p, g in perims if p == 1.0)
+    assert h1.contains(Point(LON, LAT)) and h2.covers(h1) and h2.area > h1.area

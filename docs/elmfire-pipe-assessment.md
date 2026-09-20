@@ -11,6 +11,10 @@ _Last updated 2026-09-20 · ELMFIRE main @ `cbf924a` · tier 50 m · modes `base
 
 The service runs one of two knob bundles (`fire_spread/modes.py`; `PIPELINE_MODE`, default
 `tuned`; `?mode=` per request). Both use every input in §1 unchanged; §2 describes `tuned`.
+The exposed API is the one the Deepfire-backed service had: `GET /fire/arrival-grid?lat&lon`
+answers the same five keys at 100 m (`detail=true` for the full ensemble output), and the
+decision layer keeps calling `get_deepfire().run_simulation_detailed()` — `fire_spread/compat.py`
+vectorises the ensemble grid into the hourly perimeters it expects.
 
 | Knob | `base` (ELMFIRE namelist default) | `tuned` (ours) |
 |---|---|---|

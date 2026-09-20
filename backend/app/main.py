@@ -11,13 +11,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from fire_spread import router as fire_spread_router
 from fire_spread import startup as fire_spread_startup
-from fire_spread.router import status as fire_spread_status
-from fire_spread.settings import get_settings as get_fire_settings
 
 from .config import Settings, get_settings
 from .db import create_pool, get_pool
 from .errors import install_handlers
-from .routers import add_building, assets, building_specs
+from .routers import add_building, assets, building_specs, decision
 from .schemas import HealthResponse
 
 logging.basicConfig(level=logging.INFO)
@@ -46,9 +44,13 @@ def create_app() -> FastAPI:
         description=(
             "Asset register for the wildfire values-at-risk tool. GET /assets "
             "implements the asset-register contract; the other two routes are "
-            "internal. GET/POST /fire/arrival-grid run a self-hosted ELMFIRE "
-            "fire-spread ensemble from a point or an active perimeter and return "
-            "the hour the fire reaches each grid cell plus its burn probability."
+            "internal. GET /fire/arrival-grid runs a self-hosted ELMFIRE fire-spread "
+            "simulation and returns the hour the fire reaches each grid cell.\n\n"
+            "Everything under /api is the decision layer: it takes an ignition "
+            "scenario, works out what the fire reaches and ranks it. Those "
+            "routes serve one front end and may change with it; the routes at "
+            "the root implement a contract shared with other people's code and "
+            "do not."
         ),
         version="1.0.0",
         lifespan=lifespan,
@@ -67,6 +69,8 @@ def create_app() -> FastAPI:
     # it drives ELMFIRE and Open-Meteo, not Postgres, and stays independently
     # mountable (it reads its own settings from the environment).
     app.include_router(fire_spread_router, prefix="/fire")
+    # The decision layer. Prefixed, because the root belongs to the contract.
+    app.include_router(decision.router)
     install_handlers(app)
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])
@@ -74,23 +78,13 @@ def create_app() -> FastAPI:
         pool: AsyncConnectionPool = Depends(get_pool),
         settings: Settings = Depends(get_settings),
     ) -> HealthResponse:
-        # The fire-spread half needs the ELMFIRE binary (baked into the image)
-        # and the static tier (built by scripts/setup_fire_data.sh). Neither
-        # degrades the status: the asset routes do not depend on them.
-        fire_spread = fire_spread_status()
-        fire_spread_mode = get_fire_settings().pipeline_mode
         try:
             async with pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute("SELECT 1")
                 await cur.fetchone()
         except Exception as exc:  # surfaced as a status, not a 500
-            return HealthResponse(
-                status="degraded", database="unreachable", fire_spread=fire_spread,
-                fire_spread_mode=fire_spread_mode, detail=str(exc),
-            )
-        return HealthResponse(
-            status="ok", database="connected", fire_spread=fire_spread, fire_spread_mode=fire_spread_mode
-        )
+            return HealthResponse(status="degraded", database="unreachable", detail=str(exc))
+        return HealthResponse(status="ok", database="connected")
 
     return app
 

@@ -174,19 +174,26 @@ active **perimeter** (GeoJSON polygon) and/or a point — builds a 40 × 40 km
 ELMFIRE landscape around it from the static tier (fuel, canopy, terrain, burn
 scars, barriers), fetches the live Open-Meteo forecast and ensemble for the
 domain, runs one ELMFIRE case per ensemble member in the configured pipeline
-mode, and returns the arrival time and burn probability per 50 m cell on a
-lat/lon grid.
+mode, and returns the hour the fire reaches each cell on a lat/lon grid.
+
+The `GET` default is the contract this route has always had —
+`{originLat, originLon, cellDegLat, cellDegLon, arrivalHours}` at 100 m cells —
+so its consumers see no change from the Deepfire days. `detail=true` (and every
+`POST`) returns the full ensemble output: minute-level arrival, P10/P90, burn
+probability, the weather used and the physics knobs; `cellSizeM` picks the
+output resolution (the simulation always runs at the tier's native 50 m).
 
 ```bash
-curl "http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83&ensembleMembers=8"
-curl "http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83&mode=base"     # stock ELMFIRE knobs
+curl "http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83"                            # legacy shape, 100 m
+curl "http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83&detail=true&cellSizeM=50"   # full model
+curl "http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83&mode=base"                  # stock ELMFIRE knobs
 curl -X POST http://localhost:5102/fire/arrival-grid -H 'content-type: application/json' -d '{
   "perimeter": {"type": "Polygon", "coordinates": [[[1.820,41.585],[1.835,41.585],[1.838,41.595],[1.825,41.598],[1.820,41.585]]]},
   "durationHours": 6, "ensembleMembers": 8}'
 ```
 
 ```json
-{
+{                                              // detail=true / POST; the default GET stops after arrivalHours
   "originLat": 41.58, "originLon": 1.82,
   "cellDegLat": 0.000449, "cellDegLon": 0.000601, "cellSizeM": 50,
   "durationMinutes": 1440, "ensembleMembers": 8,
@@ -388,7 +395,7 @@ Nothing here needs a database except the last two.
 
 ```bash
 cd backend
-.venv/bin/pytest -q                       # ~180 tests, a few seconds; tests/fire_spread needs no ELMFIRE or data
+.venv/bin/pytest -q                       # a few seconds; tests/fire_spread needs no ELMFIRE or data
 scripts/test_fire_spread.sh               # real ELMFIRE on a synthetic landscape, inside the container (8 tests)
 ```
 
@@ -543,6 +550,12 @@ Environment or `.env` (see `.env.example`). `.env` is gitignored.
 | `MAX_CONCURRENT_RUNS` | `1` | Simulations in flight; beyond it `/fire/arrival-grid` answers 503 |
 | `KEEP_RUNS` | `failed` | ELMFIRE run directories to keep under `data/fire_spread/runs/`: `all`, `failed`, `none` |
 | `DATA_DIR` / `RUNS_DIR` | `data/fire_spread/{catalonia,runs}` | Static tier and run directories; compose sets the in-container paths |
+
+The decision layer (`/api`) simulates through the same pipeline in-process:
+`fire_spread.router.get_deepfire()` keeps the name and interface the ported
+code was written against (`run_simulation_detailed(lat, lon)` → hourly
+perimeters with a burn probability, `fire_spread/compat.py`), so nothing under
+`app/decision` changed when Deepfire went.
 
 `DEEPFIRE_*` and the `ELMFIRE_*`/fire-spread variables are the exception to
 "settings live in `app/config.py`": `fire_spread/` reads its own

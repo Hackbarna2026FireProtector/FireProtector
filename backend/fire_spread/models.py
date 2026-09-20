@@ -36,6 +36,7 @@ class SimulationRequest:
     seed: int | None = None
     spotting: bool | None = None  # None -> settings.spotting_default
     mode: PipelineMode | None = None  # None -> settings.pipeline_mode
+    output_cell_m: float | None = None  # response grid cell (m); None -> the simulation's native cell
     debug: bool = False
 
     def to_json(self) -> dict:
@@ -49,6 +50,7 @@ class SimulationRequest:
             "seed": self.seed,
             "spotting": self.spotting,
             "mode": self.mode,
+            "cellSizeM": self.output_cell_m,
         }
 
 
@@ -70,6 +72,7 @@ class FireStateRequest(BaseModel):
     seed: int | None = Field(None, ge=1)
     spotting: bool | None = None
     mode: PipelineMode | None = None
+    cellSizeM: float = Field(100.0, ge=30, le=1000, description="Output grid cell size in metres.")
     debug: bool = False
 
     @model_validator(mode="after")
@@ -109,6 +112,21 @@ class DebugInfo(BaseModel):
     runDir: str
     timings: dict[str, float]
     elmfireStdoutTail: str
+
+
+class LegacyArrivalGrid(BaseModel):
+    """What ``GET /fire/arrival-grid`` returns by default: the contract of the original
+    (Deepfire-backed) route. Origin is the south-west corner of cell [0][0]; rows run S->N,
+    columns W->E; 0 = ignition, null = not reached within the horizon."""
+
+    originLat: float
+    originLon: float
+    cellDegLat: float
+    cellDegLon: float
+    arrivalHours: list[list[int | None]]
+
+
+LEGACY_KEYS = tuple(LegacyArrivalGrid.model_fields)
 
 
 class ArrivalGrid(BaseModel):

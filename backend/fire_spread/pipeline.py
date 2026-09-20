@@ -226,8 +226,8 @@ class Pipeline:
                 ir, ic = int((domain.yur - y) // cellsize), int((x - domain.xll) // cellsize)
                 stack[:, ir, ic] = 0.0
             stats = aggregate.summarise(stack)
-            return stats, aggregate.to_arrival_grid(stats, transform, crs, win.coverage, x, y, ign.lat, ign.lon, cellsize,
-                                                    stamp_ignition=burning is None)
+            return stats, aggregate.to_arrival_grid(stats, transform, crs, win.coverage, x, y, ign.lat, ign.lon,
+                                                    req.output_cell_m or cellsize, stamp_ignition=burning is None)
 
         stats, grid = await asyncio.to_thread(aggregate_step)
         timings["aggregate_s"] = time.perf_counter() - t

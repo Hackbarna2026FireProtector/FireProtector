@@ -65,10 +65,9 @@ services:
       ASSET_SPECS_TABLE: protection.asset_specs
       LATITUDE_COLUMN: latitude
       LONGITUDE_COLUMN: longitude
-      # Deepfire credentials for /fire/arrival-grid. The image carries no .env
-      # (.dockerignore drops it), so they have to arrive as environment
-      # variables; Compose fills them from backend/.env. Left unset, that one
-      # route answers 500 and the rest of the API is unaffected.
+      # Deepfire credentials. Not read by this API any more (the fire spread is
+      # the self-hosted ELMFIRE pipeline below); passed through from backend/.env
+      # for other Deepfire users, since the image carries no .env.
       DEEPFIRE_CLIENT_ID: ${DEEPFIRE_CLIENT_ID:-}
       DEEPFIRE_CLIENT_SECRET: ${DEEPFIRE_CLIENT_SECRET:-}
       # ELMFIRE fire-spread pipeline behind /fire/arrival-grid. The static tier
@@ -85,6 +84,15 @@ services:
       RUNS_DIR: /srv/data/fire_spread/runs
       KEEP_RUNS: ${KEEP_RUNS:-failed}
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-1}
+      # Nebius Token Factory, for the /api briefings. Left unset, the decision
+      # layer writes deterministic template briefings rather than calling an
+      # LLM, and every other route is unaffected.
+      NEBIUS_API_KEY: ${NEBIUS_API_KEY:-}
+      # Overpass mirrors for the named critical facilities, as a JSON array.
+      # Unset uses the provider's own list. Worth pinning on a network where
+      # the default mirror is unreachable: without it the ranking still works,
+      # but nothing in it has a name.
+      OVERPASS_URLS: ${OVERPASS_URLS:-}
     ports:
       # 5102 is the port the asset-register contract names, so the frontend and
       # the decision layer find the API where they expect it.
@@ -95,9 +103,13 @@ services:
       - ./app:/srv/app:ro
       - ./fire_spread:/srv/fire_spread:ro
       - ./scripts/fire_spread:/srv/scripts/fire_spread:ro
-      # Static tier, source downloads, ELMFIRE run directories and hindcast
-      # results (read-write; on Linux hosts make it writable by uid 10001).
-      - ./data/fire_spread:/srv/data/fire_spread
+      # Read-write: the decision layer's recorded scenario bundles, briefing
+      # cache and log, and under data/fire_spread the ELMFIRE static tier,
+      # source downloads, run directories and hindcast results. A bind mount
+      # rather than a named volume so a recorded bundle can be inspected,
+      # committed or hand-copied between machines. On Linux hosts make
+      # data/fire_spread writable by uid 10001.
+      - ./data:/srv/data
     # Reload only watches the code mounts: ELMFIRE writes run directories under
     # /srv/data, and watching those would restart the server mid-simulation.
     command:

@@ -73,17 +73,41 @@ def _client(app):
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t")
 
 
-async def test_ok_and_schema(app):
+LEGACY_KEYS = {"originLat", "originLon", "cellDegLat", "cellDegLon", "arrivalHours"}
+
+
+async def test_default_get_is_the_original_contract(app):
+    """``GET ?lat&lon`` answers exactly what the Deepfire-backed route did: five keys, 100 m cells."""
     a, fake = app(_grid())
     async with _client(a) as c:
         res = await c.get("/fire/arrival-grid", params={"lat": 41.59, "lon": 1.83, "ensembleMembers": 2})
     assert res.status_code == 200, res.text
     body = res.json()
-    assert body["arrivalHours"][1][0] is None and body["arrivalMinutes"][0][1] == 30.5
-    assert "debug" not in body
+    assert set(body) == LEGACY_KEYS
+    assert body["arrivalHours"] == [[0, 1], [None, 2]] and body["originLat"] == 41.58
     req = fake.calls[0]
     assert (req.ignition.lat, req.ignition.lon, req.ensemble_members, req.duration_hours) == (41.59, 1.83, 2, 24)
+    assert req.output_cell_m == 100.0
     assert req.mode is None and fake.modes == ["tuned"]  # the configured default mode
+
+    spec = yaml.safe_load(OPENAPI.read_text(encoding="utf-8"))
+    schema = {**spec["components"]["schemas"]["LegacyArrivalGrid"], "components": spec["components"]}
+    Draft202012Validator(schema).validate(body)
+
+
+async def test_detail_returns_the_full_model(app):
+    a, fake = app(_grid())
+    async with _client(a) as c:
+        res = await c.get("/fire/arrival-grid", params={"lat": 41.59, "lon": 1.83, "detail": "true", "cellSizeM": 50})
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["arrivalHours"][1][0] is None and body["arrivalMinutes"][0][1] == 30.5
+        assert "burnProbability" in body and "weather" in body and "debug" not in body
+        assert fake.calls[-1].output_cell_m == 50.0
+        # debug implies the full model (that is where the debug block lives)
+        res = await c.get("/fire/arrival-grid", params={"lat": 41.59, "lon": 1.83, "debug": "true"})
+        assert "burnProbability" in res.json() and fake.calls[-1].debug is True
+        assert (await c.get("/fire/arrival-grid", params={"lat": 41.59, "lon": 1.83, "cellSizeM": 5})).status_code == 422
 
     spec = yaml.safe_load(OPENAPI.read_text(encoding="utf-8"))
     schema = {**spec["components"]["schemas"]["ArrivalGrid"], "components": spec["components"]}
@@ -117,7 +141,8 @@ async def test_post_fire_state_perimeter(app):
     async with _client(a) as c:
         res = await c.post("/fire/arrival-grid", json={"perimeter": SQUARE, "durationHours": 6, "ensembleMembers": 2, "mode": "base"})
         assert res.status_code == 200, res.text
-        assert res.json()["arrivalMinutes"][0][1] == 30.5
+        assert res.json()["arrivalMinutes"][0][1] == 30.5  # POST always answers the full model
+        assert fake.calls[-1].output_cell_m == 100.0
         # explicit reference point wins over the centroid
         res = await c.post("/fire/arrival-grid", json={"ignition": {"lat": 41.59, "lon": 1.83}, "perimeter": SQUARE})
         assert res.status_code == 200, res.text

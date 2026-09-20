@@ -175,7 +175,13 @@ binary is absent.
 Cell `(row, col)` covers `[originLon + col·cellDegLon, +cellDegLon) × [originLat + row·cellDegLat,
 +cellDegLat)`; row 0 is the southernmost row, col 0 the westernmost. `null` = no member reached the
 cell within the horizon (or outside data coverage). The ignition cell holds `0`.
-`arrivalHours = ceil(arrivalMinutes / 60)` is kept for clients of the previous Deepfire-based API.
+`arrivalHours = ceil(arrivalMinutes / 60)` is the field of the original Deepfire-based contract:
+`GET` without `detail=true` answers only `originLat, originLon, cellDegLat, cellDegLon, arrivalHours`
+at `cellSizeM=100` (the previous route's resolution), so its consumers are unaffected. `POST`
+always answers the full model. `compat.py` gives the decision layer (`app/decision`) the
+`get_deepfire().run_simulation_detailed()` interface it was written against: per hour, one WGS84
+perimeter per probability level 0.1–1.0 (the cells at least that fraction of the ensemble had
+reached by then, from `burnProbability` and the P10/median/P90 arrival), the shape Deepfire produced.
 
 Errors: 422 ignition outside Catalonia coverage or on a non-burnable cell, perimeter with no
 burnable cell or not fitting the domain (**400** through the FireProtector API, which also

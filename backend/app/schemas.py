@@ -36,12 +36,6 @@ class BuildingSpecsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     database: str
-    fire_spread: Literal["ready", "no elmfire", "no data"] = Field(
-        description="Whether /fire/arrival-grid can run: the ELMFIRE binary and the static tier are both present."
-    )
-    fire_spread_mode: Literal["base", "tuned"] = Field(
-        description="Pipeline mode the fire-spread service runs by default (PIPELINE_MODE)."
-    )
     detail: str | None = None
 
 
