@@ -15,3 +15,41 @@ body {
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
 }
+
+@layer components {
+  /* One focus treatment for every interactive element. Keyboard-only, so it
+     never fires on the pointer clicks that make up most of the interaction. */
+  .focus-ring {
+    @apply outline-none focus-visible:ring-2 focus-visible:ring-accent/70;
+  }
+
+  /* Range inputs. Appearance is stripped, so the track and thumb below are the
+     whole control — without them the slider disappears entirely. */
+  .slider {
+    @apply h-1.5 cursor-pointer appearance-none rounded-full bg-border outline-none;
+  }
+
+  .slider::-webkit-slider-thumb {
+    @apply h-3.5 w-3.5 appearance-none rounded-full bg-accent;
+    border: 2px solid theme("colors.bg");
+    transition: box-shadow 120ms ease;
+  }
+
+  .slider::-moz-range-thumb {
+    @apply h-3.5 w-3.5 rounded-full bg-accent;
+    border: 2px solid theme("colors.bg");
+    transition: box-shadow 120ms ease;
+  }
+
+  .slider:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px theme("colors.accent / 45%");
+  }
+
+  .slider:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 3px theme("colors.accent / 45%");
+  }
+
+  .slider:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+}

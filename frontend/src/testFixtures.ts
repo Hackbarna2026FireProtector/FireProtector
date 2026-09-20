@@ -41,5 +41,6 @@ export function scoreResult(): ScoredResult {
       horizon_minutes: 300,
       cumulative_risk: [{ minute: 0, risk: 0 }],
     },
+    named_layer: { available: true, count: 3, error: null },
   };
 }

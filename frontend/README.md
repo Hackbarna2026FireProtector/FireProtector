@@ -53,6 +53,14 @@ this as `named_layer: { available, count, error }` — a list with no names
 because Overpass was unreachable must not look like a list with no critical
 facilities nearby.
 
+The ranked list acts on that field. When `available` is false it shows a
+"names unavailable" banner above the rows and falls back to the asset id, set
+in a mono face, for every row — including the ones whose register `name`
+happens to differ from their type, because a storage tank labelled
+"residential" is still the register's placeholder and not a name. Rows are
+told apart by id, distance from the ignition point, ETA and risk, since name,
+type, value and vulnerability are identical across thousands of them.
+
 ## Layout
 
 ```
@@ -61,10 +69,22 @@ src/
 ├── api/                 client.ts (fetch + ApiError), hooks.ts, types.ts
 ├── map/MapView.tsx      MapLibre: ICGC basemap, contours, assets by tier
 ├── components/          RankedList, ControlPanel, AssetDetail, ChartsPanel,
-│                        BriefingPanel, Header
-├── lib/ranks.ts         tier colours and rank-change tracking
+│   │                    BriefingPanel, Header, MapLegend
+│   └── ui/              local primitives — Button, Badge, Card, Select,
+│                        Slider, Checkbox
+├── lib/ranks.ts         tier colours, rank-change tracking, name fallback
+├── lib/geo.ts           distance from the ignition point
 └── i18n.ts              en / es / ca
 ```
+
+`components/ui/` is shadcn/ui's shape without its dependencies: the same
+variant-prop call sites (`<Button variant="ghost">`, `<Badge variant="critical">`)
+over native elements and this project's Tailwind tokens. `cn()` is eight lines
+instead of `clsx` + `tailwind-merge`, so it joins class names but does not
+resolve conflicts — the note at the top of `ui/cn.ts` says what that costs and
+what swapping the real library in would take. The sliders and the two selects
+are native controls, which is where the keyboard behaviour comes from; adopting
+Radix would mean adding `@radix-ui/react-slider` and friends.
 
 The time scrubber in `ControlPanel` restyles the contours against `t`; it does
 not refetch. Changing a scoring parameter does refetch — both `/score` and
