@@ -1,0 +1,11 @@
+{
+  "briefing.threatened": "As of {ref_time} local, {fire_name} threatens {threatened} of {total} tracked assets within a {horizon}-minute forecast ({critical} critical, {high} high).",
+  "briefing.none": "As of {ref_time} local, no tracked assets are within the forecast perimeter of {fire_name} ({horizon}-minute horizon).",
+  "briefing.top_intro": "Highest risks:",
+  "briefing.top_item": "{name} ({asset_type}, ~{eta} min, {conf}% confidence)",
+  "briefing.confidence": "Mean forecast confidence {conf}%.",
+  "briefing.sensitivity": "Ranking robustness: {label}.",
+  "briefing.label.robust": "robust",
+  "briefing.label.moderate": "moderate",
+  "briefing.label.sensitive": "sensitive"
+}

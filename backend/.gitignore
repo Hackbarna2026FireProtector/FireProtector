@@ -8,3 +8,13 @@ __pycache__/
 # Loader staging area (CSV batches, deleted as they are loaded)
 db/import/*
 !db/import/.gitkeep
+
+# Decision-layer runtime state under data/.
+#
+# Recorded scenario bundles are NOT ignored: committing one is what makes the
+# UI demonstrable without Deepfire credentials. Caches and logs are.
+data/cache/
+data/logs/
+
+# osmnx's own HTTP cache of Overpass responses.
+cache/

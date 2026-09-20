@@ -1,0 +1,11 @@
+{
+  "briefing.threatened": "A las {ref_time} hora local, {fire_name} amenaza {threatened} de {total} activos monitorizados en un horizonte de {horizon} minutos ({critical} críticos, {high} altos).",
+  "briefing.none": "A las {ref_time} hora local, ningún activo monitorizado se encuentra dentro del perímetro previsto de {fire_name} (horizonte de {horizon} minutos).",
+  "briefing.top_intro": "Riesgos más altos:",
+  "briefing.top_item": "{name} ({asset_type}, ~{eta} min, {conf}% de confianza)",
+  "briefing.confidence": "Confianza media del pronóstico: {conf}%.",
+  "briefing.sensitivity": "Robustez de la clasificación: {label}.",
+  "briefing.label.robust": "robusta",
+  "briefing.label.moderate": "moderada",
+  "briefing.label.sensitive": "sensible"
+}

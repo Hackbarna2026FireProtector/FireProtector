@@ -1,0 +1,67 @@
+# Default value (1-100, relative importance) and vulnerability (0-1,
+# susceptibility to fire damage) per asset type. Editable; record changes in
+# DECISIONS.md.
+#
+# This table IS the ranking. Two things read it:
+#
+#   - the OSM critical-facility provider, at request time;
+#   - db/init/03_asset_values.sql, which writes the register types into
+#     Postgres. Editing a register type here does nothing until that SQL is
+#     re-applied, because those columns are stored rather than computed.
+#
+# The register types are weighted by hazard rather than by replacement cost: a
+# burning fuel or chemical tank endangers responders and spreads the fire, so
+# it outranks the homes around it, while every home outranks every outbuilding.
+defaults:
+  value: 40
+  vulnerability: 0.5
+types:
+  # --- critical facilities (OpenStreetMap) -------------------------------
+  hospital:
+    value: 95
+    vulnerability: 0.6
+  clinic:
+    value: 70
+    vulnerability: 0.6
+  school:
+    value: 80
+    vulnerability: 0.7
+  substation:
+    value: 85
+    vulnerability: 0.8
+  water_plant:
+    value: 90
+    vulnerability: 0.5
+  telecom_tower:
+    value: 60
+    vulnerability: 0.7
+  care_home:
+    value: 90
+    vulnerability: 0.8
+  fuel_station:
+    value: 50
+    vulnerability: 0.9
+
+  # --- INSPIRE register (protection.asset_specs) -------------------------
+  # These are the only buildingNature codes the Catalonia register actually
+  # contains. There are no hospitals or schools among them: every real one is
+  # inside the untyped `residential` bulk, which is why the ranked list is fed
+  # from OSM and the register supplies counts.
+  storageTank:
+    value: 75 # fuel or chemical: a hazard to responders, not only a loss
+    vulnerability: 0.9
+  tower:
+    value: 60 # telecom or power infrastructure; steel, slow to ignite
+    vulnerability: 0.5
+  residential:
+    value: 45 # occupied, and 86% of the register carries this by default
+    vulnerability: 0.7
+  greenhouse:
+    value: 30 # plastic and sheeting, burns readily, low value
+    vulnerability: 0.8
+  shed:
+    value: 15 # timber outbuilding, ignites easily
+    vulnerability: 0.9
+  canopy:
+    value: 10 # minimal structure and minimal value
+    vulnerability: 0.8

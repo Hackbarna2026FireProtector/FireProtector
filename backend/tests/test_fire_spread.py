@@ -5,6 +5,7 @@ size is off produces a plausible-looking raster that points a fire crew at the
 wrong place. Everything here is pure geometry — no network.
 """
 
+import asyncio
 import math
 from importlib import import_module
 
@@ -13,6 +14,7 @@ from fastapi import HTTPException
 from shapely.geometry import Point
 
 from fire_spread.grid import CELL_SIZE_M, M_PER_DEG_LAT, GridTooLarge, build_arrival_grid
+from fire_spread.deepfire import DeepfireClient
 from fire_spread.router import get_deepfire
 
 LAT, LON = 41.80, 1.25  # La Segarra, Catalonia
@@ -178,3 +180,45 @@ def test_blank_credentials_are_reported_as_configuration(monkeypatch, missing: s
     assert excinfo.value.status_code == 500
     assert missing in excinfo.value.detail
     get_deepfire.cache_clear()
+
+
+# ---------------------------------------------------------------- ensemble --
+# The simulation is now run with ENSEMBLE_MEMBERS > 1, which changes the shape
+# of what comes back: each hour arrives as a core every member burned, plus
+# lower-probability fringes only some of them reached. The rasteriser above
+# assumes perimeters nest -- hour h contains hour h-1 -- and a fringe does not,
+# so run_simulation has to hand it the core alone or the grid silently gains
+# cells the fire is not forecast to reach.
+
+
+class _FakeClient:
+    """A DeepfireClient whose HTTP round trip is already done."""
+
+    def __init__(self, hourly):
+        self._hourly = hourly
+
+    async def run_simulation_detailed(self, lat, lon):
+        return self._hourly
+
+    run_simulation = DeepfireClient.run_simulation
+
+
+async def _certain_only(hourly):
+    return await _FakeClient(hourly).run_simulation(LAT, LON)
+
+
+def test_run_simulation_keeps_only_the_perimeters_every_member_burned() -> None:
+    core_1, core_2 = circle(300.0), circle(600.0)
+    fringe = circle(900.0)
+    hourly = [(1, 1.0, core_1), (2, 1.0, core_2), (2, 0.1, fringe)]
+
+    got = asyncio.run(_certain_only(hourly))
+
+    assert [h for h, _ in got] == [1, 2]
+    assert all(g.equals(e) for (_, g), e in zip(got, [core_1, core_2], strict=True))
+
+
+def test_a_single_member_run_is_unaffected() -> None:
+    """Without an ensemble every perimeter is certain, so none may be dropped."""
+    hourly = [(1, 1.0, circle(300.0)), (2, 1.0, circle(600.0))]
+    assert len(asyncio.run(_certain_only(hourly))) == 2
