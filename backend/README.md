@@ -450,9 +450,9 @@ scripts/setup_db.sh --only lladurs --no-forests
 
 ## Loading the data
 
-Two independent loads: the register into Postgres (`setup_db.sh`), and the
-fire-spread static tier onto disk (`setup_fire_data.sh`). Either works without
-the other.
+Two independent loads: the register into Postgres (`setup_db.sh` or
+`setup_db_container.sh`), and the fire-spread static tier onto disk
+(`setup_fire_data.sh`). Either works without the other.
 
 ```bash
 ./backend/scripts/setup_db.sh                 # everything still missing
@@ -463,6 +463,14 @@ the other.
 ./backend/scripts/setup_db.sh --no-forests    # assets only
 ./backend/scripts/setup_db.sh --reset         # wipe the volume, start over
 ```
+
+`setup_db.sh` runs the download and parsing on the host (needs `python3`,
+`curl`, a POSIX shell). `scripts/setup_db_container.sh` takes the same flags
+(except `--reset`: use `docker compose down -v`) and does the whole thing inside
+the API image via `scripts/load_register.py` — same sources, extractors,
+`load_log` resume and staging-table `COPY`, but the host needs only Docker, so
+it is the one to use on Windows or on a bare CI/cloud box. From an empty volume
+to a serving API with three municipalities and the forests takes under a minute.
 
 **Point assets.** Each municipality streams from
 [datacloud.ide.cat](https://datacloud.ide.cat/geodades/inspire-edificis/)
@@ -638,7 +646,9 @@ backend/
 │   ├── municipality_slug_map.csv
 │   └── fire_spread/             # gitignored: catalonia/ (static tier), raw/, runs/, hindcast/
 ├── scripts/
-│   ├── setup_db.sh              # containers + schema + both register loads
+│   ├── setup_db.sh              # containers + schema + both register loads (loader on the host)
+│   ├── setup_db_container.sh    # same, loader inside the api image (Docker-only host)
+│   ├── load_register.py         # the container-side loader itself
 │   ├── setup_fire_data.sh       # the fire-spread static tier, in the api container
 │   ├── test_fire_spread.sh      # the ELMFIRE-marked tests, in the api container
 │   ├── evaluate_fire_spread.sh  # base vs tuned on historical fires, in the api container

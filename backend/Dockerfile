@@ -58,6 +58,12 @@ COPY fire_spread ./fire_spread
 # Static-tier builder and hindcast tooling, run as `python -m scripts.fire_spread.…`.
 COPY scripts/__init__.py ./scripts/__init__.py
 COPY scripts/fire_spread ./scripts/fire_spread
+# Container-side register loader (scripts/setup_db_container.sh): the INSPIRE extractors,
+# the slug map they read, and the schema it applies.
+COPY scripts/load_register.py ./scripts/load_register.py
+COPY extract_buildings.py extract_forests.py ./
+COPY data/municipality_slug_map.csv ./data/municipality_slug_map.csv
+COPY db/init ./db/init
 
 # Run as a non-root user. data/fire_spread is the bind mount for the static
 # tier and run directories; it must be writable by this uid on Linux hosts.
