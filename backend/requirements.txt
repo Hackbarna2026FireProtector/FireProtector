@@ -7,5 +7,17 @@ pydantic-settings==2.15.0
 # shapely is pinned to the same version scripts/requirements.txt uses.
 httpx==0.28.1
 shapely==2.1.2
-numpy==2.5.3
 python-dotenv==1.2.3
+
+# Decision layer under /api, ported from the decision-layer repo at the pins it
+# was developed and tested against. numpy is the one shared pin that had to
+# move: 2.3.4 is what that code ran on, and nothing here needed 2.5.3.
+numpy==2.3.4
+pyproj==3.7.2          # exposure works in EPSG:25831 metres, not degrees
+pandas==2.3.3          # sensitivity: Kendall's tau, to avoid pulling in scipy
+PyYAML==6.0.3          # app/data/asset_types.yaml
+requests==2.32.5       # the ported code's HTTP client (osmnx and Nebius)
+osmnx==2.0.6           # critical facilities from Overpass
+geopandas==1.1.1       # osmnx's return type
+openai==2.6.1          # Nebius Token Factory, for briefings
+langdetect==1.0.9      # briefing validator: which language came back

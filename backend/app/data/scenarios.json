@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "Ignition scenarios: hypothetical ignitions, not detected fires.",
+    "Nothing here was observed by anyone. Each entry is a coordinate we ask",
+    "Deepfire to simulate a single-point ignition from, which is why there is",
+    "no detection time and no containment status -- see CONTEXT.md.",
+    "",
+    "Deepfire only simulates continental US, Europe and Hawaii, and an",
+    "ignition on fuel that does not carry fire (cropland, bare rock, urban",
+    "core) returns a valid forecast that simply does not grow. Pick points on",
+    "forest or scrub.",
+    "",
+    "Editing this file changes the scenario list on the next restart. A",
+    "scenario whose id already has a bundle under data/bundles/ keeps that",
+    "bundle: change the id to force a fresh simulation."
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "la-jonquera-001",
+      "name": "La Jonquera",
+      "description": "Alt Emporda, near the border. Wind-exposed cork oak and scrub; the corridor the 2012 fire ran through.",
+      "ignition_point": { "type": "Point", "coordinates": [2.87, 42.42] },
+      "declared_at": "2026-09-19T14:00:00Z"
+    },
+    {
+      "scenario_id": "la-segarra-001",
+      "name": "La Segarra",
+      "description": "Inland Lleida. Dry cereal mosaic with pine stands between the fields.",
+      "ignition_point": { "type": "Point", "coordinates": [1.2498, 41.8003] },
+      "declared_at": "2026-09-19T14:00:00Z"
+    },
+    {
+      "scenario_id": "collserola-001",
+      "name": "Collserola",
+      "description": "The forested ridge inside the Barcelona metropolitan area: the case where an ignition sits against dense building stock.",
+      "ignition_point": { "type": "Point", "coordinates": [2.0975, 41.4185] },
+      "declared_at": "2026-09-19T14:00:00Z"
+    }
+  ]
+}
