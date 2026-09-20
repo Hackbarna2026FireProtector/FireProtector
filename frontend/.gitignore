@@ -1,0 +1,9 @@
+# Build output and caches. `dist/` was committed once by accident: it is a
+# minified bundle that changes on every build, so it conflicts on every merge.
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Playwright
+playwright-report/
+test-results/

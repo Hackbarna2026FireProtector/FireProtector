@@ -20,6 +20,9 @@ and *confidence* mean here, and which words not to use.
 [p-deruiter/fireprotector-decision-layer](https://github.com/p-deruiter/fireprotector-decision-layer)
 at `abf23a3`, written by p-deruiter for this same team and hackathon.
 
+![The command centre: ranked assets, arrival contours over the ICGC basemap,
+scoring controls and ranking sensitivity](docs/screenshot.png)
+
 ## What this system does
 
 A fire spread forecast describes where a fire will be in N hours. The other

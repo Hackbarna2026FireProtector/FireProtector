@@ -15,3 +15,6 @@ db/import/*
 # UI demonstrable without Deepfire credentials. Caches and logs are.
 data/cache/
 data/logs/
+
+# osmnx's own HTTP cache of Overpass responses.
+cache/
