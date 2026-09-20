@@ -1,6 +1,9 @@
+.DS_Store
 .venv/
 __pycache__/
 *.pyc
-.env
-backend/fire_spread/data/
 .pytest_cache/
+
+# Credentials never belong in the repo. backend/.env is the one the API and
+# docker compose read; see backend/.env.example for the variables.
+*.env
