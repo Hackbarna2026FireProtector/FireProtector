@@ -1,14 +1,27 @@
 # Fire-spread service (self-hosted ELMFIRE for Catalonia)
 
-Given a point ignition, runs a Monte Carlo ensemble of [ELMFIRE](https://github.com/lautenberger/elmfire)
-simulations on open Catalan data and returns a lat/lon grid with **minute-level arrival
-times** and **per-cell uncertainty** (burn probability, P10/P90 arrival).
+Given an initial fire state — a point ignition or an active perimeter — runs a Monte Carlo
+ensemble of [ELMFIRE](https://github.com/lautenberger/elmfire) simulations on open Catalan data
+and live weather, and returns a lat/lon grid with **minute-level arrival times** and **per-cell
+uncertainty** (burn probability, P10/P90 arrival).
 
 ```
-GET /fire/arrival-grid?lat=41.59&lon=1.83[&durationHours=24][&ensembleMembers=16][&startTime=ISO][&seed=N][&spotting=1][&debug=1]
+GET  /fire/arrival-grid?lat=41.59&lon=1.83[&durationHours=24][&ensembleMembers=16][&startTime=ISO][&seed=N][&spotting=1][&mode=base|tuned][&debug=1]
+POST /fire/arrival-grid  {"ignition": {"lat", "lon"} and/or "perimeter": <GeoJSON Polygon|MultiPolygon>, "durationHours", "ensembleMembers", "startTime", "seed", "spotting", "mode", "debug"}
 ```
 
 One request = one simulation, synchronous (10–60 s). Full contract in [`openapi.yaml`](openapi.yaml).
+
+Two **pipeline modes** share every input and differ only in model knobs (`modes.py`):
+`base` is stock ELMFIRE physics (S&B 40 fuel table, no night damping, no wind gustiness,
+constant live moistures — the namelist defaults of the pinned commit), `tuned` is our
+Mediterranean/Catalan bundle (Mediterranean fuel table, ADJ 1.4, overnight factor 0.7, wind
+fluctuations, monthly live-moisture climatology — fitted on the free-burning evaluation set to
+over-burn slightly rather than under-burn). `PIPELINE_MODE` (default `tuned`) picks the
+one served; `mode=` overrides per request; the response reports it under `physics.mode` /
+`physics.modeKnobs`. A knob set explicitly in the environment (`ADJ_FACTOR=0.8`) is kept in
+both modes. The [evaluation execution](#evaluation-base-vs-tuned-on-historical-fires) decides
+whether a tweak stays in `tuned`.
 
 This package is mounted at `/fire` by the FireProtector API (`backend/app/main.py`); it never
 touches the database and reads its own settings (`fire_spread/settings.py`) from the environment
@@ -32,16 +45,23 @@ Two data tiers:
   time-lag, rain wetting), and the Open-Meteo Ensemble API (`OPEN_METEO_ENSEMBLE_MODEL`,
   ICON-EU-EPS by default) whose members become the weather streams of the ELMFIRE cases.
 
-Per request (`fire_spread/pipeline.py`): point forecast at the ignition → 40×40 km domain with
-the ignition ⅓ of the way from the upwind edge (fires run downwind), snapped to the static grid →
-window-read the layers, remapping fuel inside DARP perimeters burned < 6 years ago (`burnyear.tif`)
-→ weather grid: one block of hourly bands per NWP ensemble member, stacked into coarse
-`ws, wd, m1, m10, m100` rasters → `elmfire.data` + `inputs/ignitions.csv` (one case per row:
-same ignition, its own starting weather band; live/foliar fuel moisture from a monthly Catalan
-climatology; overnight spread damping; optional spotting) → `mpirun elmfire` → stack
-`time_of_arrival_*.tif` over cases (block offsets removed) → burn probability / median / P10 / P90
-→ reproject to a lat/lon grid (ignition at a cell centre, rows S→N, cols W→E, cropped to the
-burned extent) → JSON.
+Per request (`fire_spread/pipeline.py`): point forecast at the reference point (the ignition,
+or the perimeter centroid) → 40×40 km domain with that point ⅓ of the way from the upwind edge
+(fires run downwind), snapped to the static grid → window-read the layers, remapping fuel inside
+DARP perimeters burned < 6 years ago (`burnyear.tif`) → weather grid: one block of hourly bands
+per NWP ensemble member, stacked into coarse `ws, wd, m1, m10, m100` rasters → `elmfire.data` +
+`inputs/ignitions.csv` (one case per row: same ignition, its own starting weather band;
+live/foliar fuel moisture, night damping, wind gustiness and the fuel table per the mode;
+optional spotting) → `mpirun elmfire` → stack `time_of_arrival_*.tif` over cases (block offsets
+removed) → burn probability / median / P10 / P90 → reproject to a lat/lon grid (reference point
+at a cell centre, rows S→N, cols W→E, cropped to the burned extent) → JSON.
+
+An **active perimeter** cannot go through ELMFIRE's `PHI` raster: on the per-case-weather path
+(`RANDOM_IGNITIONS`) the level set is never seeded from it. It is written instead as up to 100
+fixed ignition points (`X_IGN/Y_IGN/T_IGN`, ELMFIRE's cap) on the outer ring of burnable cells
+inside the polygon, evenly spaced along the boundary and lit at `SIMULATION_TSTART` in every
+case; cells inside the polygon are stamped arrival 0 / probability 1 in the response, and the
+perimeter must fit the domain (≈ 10 km across at the upwind position) and touch burnable fuel.
 
 Ensemble design: every case runs on a *physically consistent* NWP member (wind, temperature,
 humidity and rain co-vary) plus small Gaussian perturbations of 1-h fuel moisture (σ 1.5 %) and
@@ -73,12 +93,15 @@ ranks, one per case, default 4), `DATA_DIR`, `RUNS_DIR`, `KEEP_RUNS=all|failed|n
 (`icon_eu_eps` 13 km/40 members but no humidity → members reuse the deterministic RH;
 `ecmwf_ifs025` 25 km/50 members, all variables), `WEATHER_HISTORY_HOURS`,
 `LH_MOISTURE_PCT`/`LW_MOISTURE_PCT`/`FOLIAR_MOISTURE_PCT` (override the monthly tables),
-`ADJ_FACTOR` (global spread-rate multiplier, 1.0), `HINDCAST`,
-`USE_BARRIERS`, `DIURNAL_ADJUSTMENT` + `OVERNIGHT_ADJUSTMENT_FACTOR` (0.4), `MAX_LOW` (fire
-ellipse length/width cap, 8), `CROWN_RATIO`, `SPOTTING_DEFAULT`, `FUEL_MODEL_SET`
-(`scott_burgan` | `mediterranean`, see below), `OPEN_METEO_BASE_URL`,
-`OPEN_METEO_ENSEMBLE_BASE_URL`, `WEATHER_FIXTURE` (JSON file instead of Open-Meteo). ELMFIRE
-needs a large `/dev/shm` (`shm_size: 2gb` in compose; `--shm-size=2g` with plain `docker run`).
+`PIPELINE_MODE` (`tuned` | `base`), and the mode-controlled knobs — `ADJ_FACTOR` (global
+spread-rate multiplier; 1.4 tuned / 1.0 base), `DIURNAL_ADJUSTMENT` + `OVERNIGHT_ADJUSTMENT_FACTOR` (0.7 tuned),
+`MAX_LOW` (fire ellipse length/width cap, 8), `WIND_FLUCTUATIONS`, `FUEL_MODEL_SET`
+(`scott_burgan` | `mediterranean`, see below) — which pin that knob in both modes when set;
+`HINDCAST`, `USE_BARRIERS`, `CROWN_RATIO`, `SPOTTING_DEFAULT`, `PERIMETER_MAX_IGNITIONS` (100),
+`OPEN_METEO_BASE_URL`,
+`OPEN_METEO_ENSEMBLE_BASE_URL`, `WEATHER_FIXTURE` (JSON file instead of Open-Meteo). Open-Meteo
+429/5xx answers are retried (5 s, 15 s on the live route; batch scripts wait out the minutely
+limit with 15/65/65 s). ELMFIRE needs a large `/dev/shm` (`shm_size: 2gb` in compose; `--shm-size=2g` with plain `docker run`).
 
 All sources download automatically (Copernicus DEM from AWS, ZAFM fuel from Zenodo, ICGC canopy
 from `datacloud.icgc.cat`, ZHR from `interior.gencat.cat`, fire perimeters from
@@ -100,6 +123,8 @@ python -m fire_spread.cli --lat 41.59 --lon 1.83 --weather-fixture tests/fire_sp
 python -m fire_spread.cli --lat 41.59 --lon 1.83 --synthetic --constant-wind 9 270   # no static data needed
 python -m fire_spread.cli --lat 41.59 --lon 1.83 --elmfire-data-only                  # stop after writing the run dir
 python -m fire_spread.cli --lat 41.59 --lon 1.83 --spotting --no-ensemble --fuels mediterranean
+python -m fire_spread.cli --lat 41.59 --lon 1.83 --mode base                          # stock ELMFIRE knobs
+python -m fire_spread.cli --perimeter fire.geojson --hours 6                          # active perimeter (geometry or Feature)
 ```
 
 Results are deterministic for a given `startTime` (the minute offset inside the ignition hour is
@@ -112,6 +137,11 @@ cd backend
 .venv/bin/pytest tests/fire_spread     # unit tests, run anywhere (no ELMFIRE, no data)
 scripts/test_fire_spread.sh            # real ELMFIRE on a synthetic landscape, inside the api container
 ```
+
+Unit tests cover the modes (`test_modes.py`: knob bundles, env precedence, what reaches
+`elmfire.data`), the perimeter fire state (`test_perimeter.py`), the router (GET/POST, `mode=`),
+and the evaluation report (`test_evaluate.py`); the container tests run real ELMFIRE for a point,
+a perimeter, both modes, ensembles, barriers and spotting.
 
 The image carries neither `tests/` nor the dev dependencies; the script mounts and installs them
 on the fly. `pytest.ini` at `backend/` registers the `elmfire` marker; those tests skip when the
@@ -130,9 +160,10 @@ binary is absent.
   "burnProbability":   [[0.0, 0.94, ...], ...],
   "weather": {"source": "open-meteo:best_match+icon_eu_eps", "windSpeedAvgMs": 6.1, "windDirectionAvg": 281,
               "fuelMoisture1hAvgPct": 7.2, "fuelMoisture100hAvgPct": 12.1, "weatherMembers": 16, ...},
-  "physics": {"spotting": false, "barriers": true, "diurnalAdjustment": true, "sunriseUtc": 5.6,
+  "physics": {"mode": "tuned", "modeKnobs": {"fuel_model_set": "mediterranean", "adj_factor": 1.0, ...},
+              "spotting": false, "barriers": true, "diurnalAdjustment": true, "sunriseUtc": 5.6,
               "sunsetUtc": 17.9, "weatherGrid": 4, "cellSizeM": 50, "ignitionOffsetS": 1200,
-              "fuelModelSet": "scott_burgan"},
+              "fuelModelSet": "mediterranean", "adjFactor": 1.0, "perimeterIgnitions": 0},
   "zone": {"name": "...", "dominantFireType": "...", "designFires": {}, "properties": {...}}
 }
 ```
@@ -142,8 +173,9 @@ Cell `(row, col)` covers `[originLon + col·cellDegLon, +cellDegLon) × [originL
 cell within the horizon (or outside data coverage). The ignition cell holds `0`.
 `arrivalHours = ceil(arrivalMinutes / 60)` is kept for clients of the previous Deepfire-based API.
 
-Errors: 422 ignition outside Catalonia coverage or on a non-burnable cell (**400** through the
-FireProtector API, which also wraps every error as `{"error": {"code", "message"}}`) · 502
+Errors: 422 ignition outside Catalonia coverage or on a non-burnable cell, perimeter with no
+burnable cell or not fitting the domain (**400** through the FireProtector API, which also
+wraps every error as `{"error": {"code", "message"}}`) · 502
 weather provider failure · 503 all simulation slots busy, or static tier not built · 504
 ELMFIRE timeout.
 
@@ -152,9 +184,9 @@ ELMFIRE timeout.
 ELMFIRE's Rothermel parameters come from a CSV (`FUEL_MODEL_FILE`); the pipeline writes
 `inputs/fuel_models.csv` per run from `fire_spread/data/`:
 
-* `scott_burgan` (default) – ELMFIRE's own table (Anderson 13 + Scott & Burgan 40), i.e. the
+* `scott_burgan` (`base` mode) – ELMFIRE's own table (Anderson 13 + Scott & Burgan 40), i.e. the
   US parameterisation the ZAFM fuel map's codes refer to.
-* `mediterranean` – `fuel_models_mediterranean.csv`: the codes ZAFM assigns in Catalonia
+* `mediterranean` (`tuned` mode) – `fuel_models_mediterranean.csv`: the codes ZAFM assigns in Catalonia
   (GR4, SH2/5/7/8/9, TU1/2/3/5) re-parameterised in metric units for garriga/maquia, *Pinus
   halepensis* stands and cereal stubble — lighter and shallower shrub beds than the chaparral
   originals (SH5/SH7 are 1.8 m deep, 20–30 t/ha), finer shrub foliage (SAV 50–60 /cm),
@@ -225,21 +257,52 @@ user guide at elmfire.io.
   raster is read by one MPI rank and only its header broadcast, so `USE_BARRIERS` segfaults with
   `-np > 1` → the data is broadcast after the header.
 
+## Evaluation: base vs tuned on historical fires
+
+`scripts/evaluate_fire_spread.sh` (→ `scripts/fire_spread/evaluate.py`) is the evaluation
+execution. It runs both modes through the same pipeline as the API, swapping live weather for
+Open-Meteo's **historical forecast** archive (past runs of the same high-resolution models;
+`--weather archive` = ERA5) and ignoring the ignition-year burn scar (`HINDCAST=true`), on the
+fires in `scripts/fire_spread/eval_fires.json`: Catalan wildfires that burned free for long
+enough that a no-suppression simulation is comparable with the final DARP perimeter. Each entry
+gives the ignition time and free-burning horizon (approximate, from public briefings — edit and
+rerun); the ignition point is the upwind-most burnable perimeter vertex unless `ignition` is
+given. Both modes get the same fires, points, weather and seeds.
+
+```sh
+cd backend
+scripts/evaluate_fire_spread.sh                          # 8 fires x 2 modes, 4 members: 30-60 min
+scripts/evaluate_fire_spread.sh --limit 2 --members 2    # smoke run
+scripts/evaluate_fire_spread.sh --modes tuned --fires 2022250092,2022250084 --weather archive
+```
+
+Knob experiments without editing `modes.py`: an explicitly set environment variable pins the knob,
+e.g. `docker compose run --rm -e ADJ_FACTOR=1.3 -e OVERNIGHT_ADJUSTMENT_FACTOR=0.7 --no-deps api
+python -m scripts.fire_spread.evaluate --modes tuned --out data/fire_spread/hindcast/eval_adj13`.
+
+Output under `data/fire_spread/hindcast/eval_<timestamp>/`: `base.csv`, `tuned.csv` (per fire:
+Jaccard, Sørensen, area bias, recall, precision, `elmfire_s`, `prep_s`, `wall_s`),
+`summary.json` and `summary.md` — paired per-fire table, per-mode aggregates (mean/median
+Jaccard, Sørensen, bias quartiles, recall/precision) and timing (median/max wall, ELMFIRE and
+preparation seconds; the same work in both modes, reported so a knob that shrinks ELMFIRE's time
+step shows up), plus a "Jaccard wins" count. Paste the table into
+[`docs/elmfire-pipe-assessment.md`](../../docs/elmfire-pipe-assessment.md).
+
 ## Calibration: the hindcast loop
 
-`scripts/fire_spread/hindcast.py` replays DARP fire perimeters with the pipeline and scores them — the only
-way to decide any of the knobs above. Per fire: perimeter + date (DARP has no ignition point,
-time or duration) → ERA5 weather via the Open-Meteo archive API (`OpenMeteoProvider(archive=True)`,
-statistical wind perturbations since there is no reanalysis ensemble) → ignition at the most
-upwind burnable point of the perimeter at 12:00 UTC → 24 h run (`--hours`) → burn probability
-≥ `--pmin` vs the observed perimeter: Jaccard, Sørensen, area bias. `HINDCAST=true` makes the
-pipeline ignore burn scars of the ignition year (the simulated fire is in `burnyear.tif`).
+`scripts/fire_spread/hindcast.py` is the general form of the above: replays *any* DARP fire
+perimeters (`--years`, `--min-ha`, `--limit`, `--fires`) with one mode and optional knob
+overrides. Per fire: perimeter + date (DARP has no ignition point, time or duration) → historical
+weather (`--weather historical|archive`; statistical wind perturbations since there is no past
+ensemble) → ignition at the most upwind burnable point of the perimeter at `--ign-hour` UTC →
+`--hours` run → burn probability ≥ `--pmin` vs the observed perimeter: Jaccard, Sørensen, area
+bias.
 
 ```sh
 cd backend
 docker compose run --rm api python -m scripts.fire_spread.hindcast --min-ha 100 --limit 10
-# knobs: --fuels mediterranean  --adj 0.8  --hours 36  --spotting  --no-barriers  --members 8
-docker compose run -d --name hindcast api bash scripts/fire_spread/hindcast_batch.sh "--fuels scott_burgan" "--fuels mediterranean"
+# --mode base|tuned, then overrides: --fuels mediterranean  --adj 0.8  --max-low 6  --hours 36  --spotting  --no-barriers  --members 8
+docker compose run -d --name hindcast api bash scripts/fire_spread/hindcast_batch.sh "--mode base" "--mode tuned"
 ```
 
 Results land in `data/fire_spread/hindcast/<tag>.csv`; the summary line is formatted for the log in

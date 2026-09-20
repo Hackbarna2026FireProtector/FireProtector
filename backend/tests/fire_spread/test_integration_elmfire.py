@@ -21,14 +21,19 @@ LAT, LON = 41.59, 1.83
 MPH20 = 20.0 / 2.23693629
 
 
-def _pipeline(tmp_path, members_nproc=2, member_wd_step_deg=None, barrier=None, **settings):
+def _pipeline(tmp_path, members_nproc=2, member_wd_step_deg=None, barrier=None, mode=None, **settings):
     s = Settings(runs_dir=tmp_path / "runs", keep_runs="all", domain_size_m=5000.0, elmfire_nproc=members_nproc, **settings)
     return Pipeline(
         settings=s,
         weather_provider=ConstantProvider(ws_ms=MPH20, wd_deg=270.0, temp_c=30.0, rh_pct=20.0, sigma_ws_ms=1.5,
                                           sigma_wd_deg=10.0, member_wd_step_deg=member_wd_step_deg),
         landscape=SyntheticLandscape(fbfm=102, cellsize=50.0, barrier=barrier),
+        mode=mode,
     )
+
+
+def _arr(rows):
+    return np.array([[np.nan if v is None else v for v in row] for row in rows])
 
 
 def _ign_rc(grid):
@@ -138,3 +143,48 @@ async def test_reproducible_seed(tmp_path):
     a = await _pipeline(tmp_path).run(req)
     b = await _pipeline(tmp_path).run(req)
     assert a.arrivalMinutes == b.arrivalMinutes
+
+
+async def test_perimeter_ignition(tmp_path):
+    """An active perimeter (600 x 600 m square) is burning at t 0 in every member and the
+    fire grows out of it - mostly downwind - via the fixed X_IGN/Y_IGN points."""
+    from fire_spread.landscape import lonlat_to_xy, xy_to_lonlat
+    x0, y0 = lonlat_to_xy(LON, LAT)
+    ring = [xy_to_lonlat(x0 + dx, y0 + dy) for dx, dy in ((-300, -300), (300, -300), (300, 300), (-300, 300), (-300, -300))]
+    perimeter = {"type": "Polygon", "coordinates": [[list(p) for p in ring]]}
+    start = datetime(2026, 8, 1, 13, 0, tzinfo=timezone.utc)
+    req = SimulationRequest(Ignition(LAT, LON, perimeter), duration_hours=1, ensemble_members=2, seed=9, start_time=start, debug=True)
+    grid = await _pipeline(tmp_path).run(req)
+    assert grid.physics["perimeterIgnitions"] > 20
+    data = (tmp_path / "runs" / grid.debug.runId / "elmfire.data").read_text()
+    assert f"NUM_IGNITIONS = {grid.physics['perimeterIgnitions'] - 1}" in data and "T_IGN(1) = 0.0" in data
+    mins, prob = _arr(grid.arrivalMinutes), _arr(grid.burnProbability)
+    r, c = _ign_rc(grid)
+    # inside the square (±6 cells): arrival 0, probability 1 in both members
+    inner = (slice(r - 4, r + 5), slice(c - 4, c + 5))
+    assert np.all(mins[inner] == 0.0) and np.all(prob[inner] == 1.0)
+    # the fire left the square and ran east (wind from 270)
+    burned = ~np.isnan(mins)
+    assert burned.sum() > 12 * 12 * 1.5, burned.sum()
+    cols = np.nonzero(burned[r])[0]
+    assert cols.max() - c > 6 + 5 and (cols.max() - c) > 2 * (c - cols.min()) - 6
+    # cells just outside the square burn later than the ring (arrival increases outward)
+    assert mins[r, c + 8] > 0 and mins[r, c + 10] >= mins[r, c + 8]
+
+    # a point run from the same reference burns strictly less within the hour
+    point = await _pipeline(tmp_path).run(SimulationRequest(Ignition(LAT, LON), duration_hours=1, ensemble_members=2, seed=9, start_time=start))
+    assert (~np.isnan(_arr(point.arrivalMinutes))).sum() < burned.sum()
+
+
+async def test_both_modes_run(tmp_path):
+    """base (stock physics) and tuned (our knobs) both complete on the same inputs and
+    differ only through the model knobs; the response says which mode produced it."""
+    start = datetime(2026, 8, 1, 13, 0, tzinfo=timezone.utc)
+    req = SimulationRequest(Ignition(LAT, LON), duration_hours=1, ensemble_members=1, seed=6, start_time=start, debug=True)
+    out = {m: await _pipeline(tmp_path, mode=m).run(req) for m in ("base", "tuned")}
+    for m, g in out.items():
+        assert g.physics["mode"] == m and g.physics["modeKnobs"]["fuel_model_set"] == ("mediterranean" if m == "tuned" else "scott_burgan")
+        assert (~np.isnan(_arr(g.arrivalMinutes))).sum() > 50, m
+        assert g.debug.timings["elmfire_s"] > 0
+    assert out["base"].physics["diurnalAdjustment"] is False and out["tuned"].physics["diurnalAdjustment"] is True
+    assert out["base"].arrivalMinutes != out["tuned"].arrivalMinutes

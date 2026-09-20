@@ -4,17 +4,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+PipelineMode = Literal["base", "tuned"]
 
 
 @dataclass(frozen=True)
 class Ignition:
-    """Fire state input. v1: a point. An active perimeter can be added later as an
-    alternative that renders a ``phi`` raster instead of ``X_IGN/Y_IGN``."""
+    """Initial fire state: a point, or an active perimeter (GeoJSON Polygon/MultiPolygon in
+    lon/lat) whose boundary is lit at t 0. ``lat``/``lon`` is the reference point - the
+    ignition itself for a point fire, the perimeter centroid otherwise (it anchors the
+    domain, the weather point and the response grid)."""
 
     lat: float
     lon: float
+    perimeter: dict | None = None
+
+    @property
+    def is_perimeter(self) -> bool:
+        return self.perimeter is not None
 
 
 @dataclass
@@ -25,18 +35,52 @@ class SimulationRequest:
     start_time: datetime | None = None
     seed: int | None = None
     spotting: bool | None = None  # None -> settings.spotting_default
+    mode: PipelineMode | None = None  # None -> settings.pipeline_mode
     debug: bool = False
 
     def to_json(self) -> dict:
         return {
             "lat": self.ignition.lat,
             "lon": self.ignition.lon,
+            "perimeter": self.ignition.perimeter,
             "durationHours": self.duration_hours,
             "ensembleMembers": self.ensemble_members,
             "startTime": self.start_time.isoformat() if self.start_time else None,
             "seed": self.seed,
             "spotting": self.spotting,
+            "mode": self.mode,
         }
+
+
+class PointIgnition(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+
+
+class FireStateRequest(BaseModel):
+    """Body of ``POST /fire/arrival-grid``: a point ignition and/or an active perimeter."""
+
+    ignition: PointIgnition | None = None
+    perimeter: dict[str, Any] | None = Field(
+        None, description="GeoJSON Polygon or MultiPolygon (WGS84 lon/lat) of the currently burning area."
+    )
+    durationHours: int = Field(24, ge=1, le=48)
+    ensembleMembers: int = Field(16, ge=1, le=64)
+    startTime: datetime | None = None
+    seed: int | None = Field(None, ge=1)
+    spotting: bool | None = None
+    mode: PipelineMode | None = None
+    debug: bool = False
+
+    @model_validator(mode="after")
+    def _one_fire_state(self) -> "FireStateRequest":
+        if self.ignition is None and self.perimeter is None:
+            raise ValueError("provide 'ignition' (lat/lon) and/or 'perimeter' (GeoJSON polygon)")
+        if self.perimeter is not None:
+            t = self.perimeter.get("type")
+            if t not in ("Polygon", "MultiPolygon") or "coordinates" not in self.perimeter:
+                raise ValueError("perimeter must be a GeoJSON Polygon or MultiPolygon geometry")
+        return self
 
 
 class WeatherSummary(BaseModel):

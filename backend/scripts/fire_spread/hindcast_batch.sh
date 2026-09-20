@@ -2,7 +2,7 @@
 # Hindcast several settings back to back; log to data/fire_spread/hindcast/batch.log. Run detached
 # from backend/ (the compose service mounts scripts/ and data/fire_spread/):
 #   docker compose run -d --name hindcast api bash scripts/fire_spread/hindcast_batch.sh \
-#       "--fuels mediterranean" "--fuels mediterranean --spotting"
+#       "--mode base" "--mode tuned" "--mode tuned --spotting"
 cd /srv
 HC=data/fire_spread/hindcast
 mkdir -p "$HC"

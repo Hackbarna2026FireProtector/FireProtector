@@ -15,7 +15,11 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from pyproj import Transformer
+from rasterio import features
 from rasterio.windows import Window
+from shapely.geometry import shape
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform as shp_transform
 
 from .models import Ignition, OutsideCoverage
 from .rasters import NODATA, grid_transform, write_raster
@@ -204,6 +208,70 @@ def check_ignition(win: LandscapeWindow, x: float, y: float) -> None:
         raise OutsideCoverage("ignition outside static data coverage (Catalonia)")
     if code in NON_BURNABLE:
         raise OutsideCoverage(f"ignition on a non-burnable cell (FBFM40 {code}: urban/water/agriculture/barren)")
+
+
+# --- active perimeter -----------------------------------------------------------------
+
+
+def perimeter_to_xy(perimeter: dict) -> BaseGeometry:
+    """GeoJSON Polygon/MultiPolygon (lon/lat) -> shapely geometry in the static CRS."""
+    geom = shape(perimeter)
+    if geom.is_empty or geom.geom_type not in ("Polygon", "MultiPolygon"):
+        raise OutsideCoverage("perimeter must be a non-empty Polygon or MultiPolygon")
+    geom = shp_transform(lambda x, y, z=None: lonlat_to_xy(x, y), geom)
+    if not geom.is_valid:
+        geom = geom.buffer(0)
+    return geom
+
+
+def perimeter_mask(win: LandscapeWindow, geom_xy: BaseGeometry) -> np.ndarray:
+    """bool (n, n): cells whose centre lies inside the perimeter (raster order, row 0 = top)."""
+    n = win.domain.n
+    return features.rasterize(
+        [(geom_xy, 1)], out_shape=(n, n), transform=win.domain.transform, fill=0, dtype="uint8"
+    ).astype(bool)
+
+
+def perimeter_ignitions(win: LandscapeWindow, geom_xy: BaseGeometry, max_points: int = 100,
+                        mask: np.ndarray | None = None) -> list[tuple[float, float]]:
+    """Up to ``max_points`` cell centres on the outer ring of the burning area (cells inside
+    the perimeter with a 4-neighbour outside it) that carry burnable fuel, evenly spaced
+    along the boundary: the fixed ignition points ELMFIRE lights in every case.
+
+    422 when the perimeter leaves the domain (it must fit: the domain is placed around the
+    reference point) or its ring touches no burnable cell."""
+    d = win.domain
+    minx, miny, maxx, maxy = geom_xy.bounds
+    if not (d.xll <= minx and maxx < d.xur and d.yll <= miny and maxy < d.yur):
+        raise OutsideCoverage("perimeter does not fit the simulation domain (too large or too far from the reference point)")
+    inside = perimeter_mask(win, geom_xy) if mask is None else mask
+    if not inside.any():
+        raise OutsideCoverage("perimeter covers no cell centre (smaller than a cell?)")
+    padded = np.pad(inside, 1)
+    ring = inside & ~(padded[:-2, 1:-1] & padded[2:, 1:-1] & padded[1:-1, :-2] & padded[1:-1, 2:])
+    fbfm = win.layers["fbfm40"]
+    ring &= (fbfm != NODATA) & ~np.isin(fbfm, list(NON_BURNABLE))
+    if not ring.any():
+        raise OutsideCoverage("perimeter touches no burnable cell (urban/water/agriculture/barren or outside coverage)")
+    # Walk the polygon boundary (half a cell per step) and pick the nearest unvisited ring
+    # cell around each step, so the ring is ordered along the perimeter for even subsampling.
+    ordered: list[tuple[int, int]] = []
+    left = ring.copy()
+    polys = geom_xy.geoms if hasattr(geom_xy, "geoms") else [geom_xy]
+    for poly in polys:
+        for x, y in poly.exterior.segmentize(d.cellsize / 2).coords:
+            col, row = int((x - d.xll) // d.cellsize), int((d.yur - y) // d.cellsize)
+            for dr, dc in ((0, 0), (0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+                r, c = row + dr, col + dc
+                if 0 <= r < d.n and 0 <= c < d.n and left[r, c]:
+                    ordered.append((r, c))
+                    left[r, c] = False
+                    break
+    ordered += [tuple(rc) for rc in np.argwhere(left)]  # ring cells the walk did not touch (inner rings)
+    if len(ordered) > max_points:
+        idx = np.linspace(0, len(ordered) - 1, max_points).round().astype(int)
+        ordered = [ordered[i] for i in dict.fromkeys(idx.tolist())]
+    return [(d.xll + (c + 0.5) * d.cellsize, d.yur - (r + 0.5) * d.cellsize) for r, c in ordered]
 
 
 def write_inputs(win: LandscapeWindow, out_dir: Path, adj: float = 1.0) -> None:

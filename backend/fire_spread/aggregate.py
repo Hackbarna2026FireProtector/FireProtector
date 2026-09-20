@@ -126,11 +126,14 @@ def to_arrival_grid(
     ign_lat: float,
     ign_lon: float,
     cell_size_m: float,
+    stamp_ignition: bool = True,
 ) -> dict:
     """Reproject statistics to a lat/lon grid (~cell_size_m) cropped to the burned extent.
 
     Returns the grid part of the ArrivalGrid response: rows S->N, cols W->E, ``None``
-    where no member burned or outside static-data coverage.
+    where no member burned or outside static-data coverage. ``stamp_ignition`` forces the
+    reference cell to t 0 (a point ignition; off for perimeters, whose centroid may lie
+    outside the fire).
     """
     res = transform.a
     ign_col = int((ign_x - transform.c) // res)
@@ -179,7 +182,7 @@ def to_arrival_grid(
     # The ignition cell burns at t=0 by definition; nearest resampling can miss the single
     # source cell when the ignition is off-centre, so set it explicitly (as the old grid did).
     ir, ic = int((ign_lat - oy) / dlat), int((ign_lon - ox) / dlon)
-    if 0 <= ir < ny and 0 <= ic < nx and 0 <= ign_row < coverage.shape[0] and 0 <= ign_col < coverage.shape[1] and coverage[ign_row, ign_col]:
+    if stamp_ignition and 0 <= ir < ny and 0 <= ic < nx and 0 <= ign_row < coverage.shape[0] and 0 <= ign_col < coverage.shape[1] and coverage[ign_row, ign_col]:
         med[ir, ic] = p10[ir, ic] = p90[ir, ic] = 0.0
         prob[ir, ic] = 1.0
 

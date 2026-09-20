@@ -31,6 +31,7 @@ import numpy as np
 from . import aggregate, elmfire_config, fuels, landscape as ls, weather as wx
 from .elmfire_runner import run_elmfire
 from .models import ArrivalGrid, DebugInfo, PipelineError, SimulationRequest
+from .modes import apply_mode, mode_summary
 from .rasters import grid_transform, write_bands
 from .settings import Settings, get_settings
 from .solar import sunrise_sunset_utc
@@ -40,15 +41,23 @@ log = logging.getLogger("fire_spread")
 
 
 class Pipeline:
+    """One pipeline = one resolved mode (``settings.pipeline_mode`` after ``apply_mode``);
+    the router keeps one per mode and the evaluation loop builds one per mode."""
+
     def __init__(
         self,
         settings: Settings | None = None,
         weather_provider: wx.WeatherProvider | None = None,
         landscape: ls.Landscape | ls.SyntheticLandscape | None = None,
+        mode: str | None = None,
     ):
-        self.settings = settings or get_settings()
+        self.settings = apply_mode(settings or get_settings(), mode)
         self._provider = weather_provider
         self._landscape = landscape
+
+    @property
+    def mode(self) -> str:
+        return self.settings.pipeline_mode
 
     # --- lazily-built collaborators ---------------------------------------------------
 
@@ -114,7 +123,7 @@ class Pipeline:
         point_wx = await self.provider.fetch([(ign.lat, ign.lon)], band1, hours, s.weather_history_hours, 1)
         timings["weather_point_s"] = time.perf_counter() - t
 
-        # 2. ignition -> projected domain, ignition placed upwind of centre
+        # 2. reference point -> projected domain, placed upwind of centre
         x, y, domain = ls.ignition_to_domain(
             ign, s.domain_size_m, cellsize,
             downwind=wx.mean_downwind_unit(point_wx.forecast()), ignition_frac=s.ignition_frac,
@@ -126,16 +135,25 @@ class Pipeline:
         # 3. static landscape window (recent DARP burns remapped for the ignition year).
         # The raster work here, in 4 and in 7 takes seconds of CPU and disk; it runs in a
         # worker thread so the other routes of the app stay responsive during a simulation.
+        # An active perimeter becomes fixed ignition points along its boundary (see
+        # elmfire_config) plus a mask of the cells already burning at t 0.
         t = time.perf_counter()
         use_barriers = s.use_barriers and land.has_barriers
 
         def landscape_step():
             win = land.read_window(domain, now_year=start.year, barriers=use_barriers, burn_min_age=1 if s.hindcast else 0)
-            ls.check_ignition(win, x, y)
+            if ign.is_perimeter:
+                geom = ls.perimeter_to_xy(ign.perimeter)
+                burning = ls.perimeter_mask(win, geom)
+                points = ls.perimeter_ignitions(win, geom, s.perimeter_max_ignitions, mask=burning)
+            else:
+                ls.check_ignition(win, x, y)
+                points, burning = [(x, y)], None
             ls.write_inputs(win, run_dir / "inputs", adj=s.adj_factor)
-            return win
+            return win, points, burning
 
-        win = await asyncio.to_thread(landscape_step)
+        win, ign_points, burning = await asyncio.to_thread(landscape_step)
+        x_ign, y_ign = ign_points[0]  # CSV ignition: the point itself, or the first boundary cell
         timings["landscape_s"] = time.perf_counter() - t
 
         # 4. weather grid over the domain: deterministic + NWP ensemble members
@@ -161,13 +179,15 @@ class Pipeline:
         hour_of_year = (band1 - datetime(band1.year, 1, 1, tzinfo=timezone.utc)).total_seconds() / 3600
         params = elmfire_config.ElmfireParams(
             xllcorner=domain.xll, yllcorner=domain.yll, cellsize=domain.cellsize,
-            x_ign=x, y_ign=y, duration_s=req.duration_hours * 3600.0, tstart_s=tstart_s, a_srs=ls.CRS,
+            x_ign=x_ign, y_ign=y_ign, extra_ignitions=ign_points[1:],
+            duration_s=req.duration_hours * 3600.0, tstart_s=tstart_s, a_srs=ls.CRS,
             cases=req.ensemble_members, weather_members=n_members, bands_per_block=bands_per_block,
             seed=seed, lh_moisture_pct=lh, lw_moisture_pct=lw, foliar_moisture_pct=fmc,
             diurnal=s.diurnal_adjustment, forecast_start_hour_utc=band1.hour,
             current_year=band1.year, hour_of_year=int(hour_of_year),
             overnight_adjustment_factor=s.overnight_adjustment_factor,
-            max_low=s.max_low, crown_ratio=s.crown_ratio, wx_bilinear=s.weather_bilinear and wgrid.n > 1,
+            max_low=s.max_low, crown_ratio=s.crown_ratio, wind_fluctuations=s.wind_fluctuations,
+            wx_bilinear=s.weather_bilinear and wgrid.n > 1,
             use_barriers=win.barrier is not None, spotting=spotting,
             max_runtime_s=max(60.0, s.elmfire_timeout_s - 30.0),
             perturbations=elmfire_config.default_perturbations(
@@ -198,11 +218,15 @@ class Pipeline:
             ], dtype=np.float32)
             burned = stack >= 0
             stack = np.where(burned, np.clip(stack - offsets[:, None, None], 0.0, req.duration_hours * 3600.0), -1.0)
-            # ELMFIRE stamps the ignition cell with the time of its first (CFL-sized) step
-            ir, ic = int((domain.yur - y) // cellsize), int((x - domain.xll) // cellsize)
-            stack[:, ir, ic] = 0.0
+            if burning is not None:
+                stack[:, burning] = 0.0  # inside the perimeter: burning at t 0 by definition
+            else:
+                # ELMFIRE stamps the ignition cell with the time of its first (CFL-sized) step
+                ir, ic = int((domain.yur - y) // cellsize), int((x - domain.xll) // cellsize)
+                stack[:, ir, ic] = 0.0
             stats = aggregate.summarise(stack)
-            return stats, aggregate.to_arrival_grid(stats, transform, crs, win.coverage, x, y, ign.lat, ign.lon, cellsize)
+            return stats, aggregate.to_arrival_grid(stats, transform, crs, win.coverage, x, y, ign.lat, ign.lon, cellsize,
+                                                    stamp_ignition=burning is None)
 
         stats, grid = await asyncio.to_thread(aggregate_step)
         timings["aggregate_s"] = time.perf_counter() - t
@@ -215,10 +239,12 @@ class Pipeline:
             weather={**weather.summary(wgrid.nearest_index(x, y)), "liveHerbaceousPct": lh, "liveWoodyPct": lw,
                      "foliarMoisturePct": fmc},
             physics={
+                "mode": s.pipeline_mode, "modeKnobs": mode_summary(s),
                 "spotting": spotting, "barriers": win.barrier is not None, "diurnalAdjustment": s.diurnal_adjustment,
                 "sunriseUtc": round(sunrise, 2), "sunsetUtc": round(sunset, 2),
                 "weatherGrid": wgrid.n, "cellSizeM": cellsize, "ignitionOffsetS": tstart_s,
                 "fuelModelSet": s.fuel_model_set, "adjFactor": s.adj_factor,
+                "perimeterIgnitions": len(ign_points) if ign.is_perimeter else 0,
             },
             zone=zone,
         )

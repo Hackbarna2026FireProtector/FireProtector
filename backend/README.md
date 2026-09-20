@@ -2,10 +2,10 @@
 
 Asset-register API for the wildfire values-at-risk tool. FastAPI over Postgres,
 both in Docker. `GET /assets` implements a contract shared with other people's
-code; the other two register routes are internal. `GET /fire/arrival-grid` is
+code; the other two register routes are internal. `/fire/arrival-grid` is
 the one route that is not about the register at all — it runs a self-hosted
-ELMFIRE fire-spread ensemble and returns where the fire will be, minute by
-minute, with a burn probability per cell.
+ELMFIRE fire-spread ensemble from a point or an active perimeter and returns
+where the fire will be, minute by minute, with a burn probability per cell.
 
 Start with [Orientation](#orientation) and [Contract
 invariants](#contract-invariants). The invariants are the part that fails
@@ -25,7 +25,11 @@ image) runs a Monte Carlo ensemble on a 40 km domain — 10–60 s typically, 15
 minutes before it gives up. It needs the Catalonia static tier built once by
 `scripts/setup_fire_data.sh` (≈2 GB of downloads) and live weather from
 Open-Meteo; it covers Catalonia only. Nothing else in the API depends on it,
-and `GET /health` says whether it is `ready`.
+and `GET /health` says whether it is `ready` and which **pipeline mode** it
+serves: `tuned` (our Mediterranean/Catalan model knobs, the default) or `base`
+(stock ELMFIRE physics on the same data). `scripts/evaluate_fire_spread.sh`
+replays both modes on historical weather against real free-burning fires and
+reports which one is closer to what actually burned, and how long each takes.
 
 **The forests are not served by `/assets`** — deliberately. They are in
 `protection.forest_areas`, queryable in SQL, and any consumer wanting them
@@ -162,17 +166,23 @@ Accepts a single object or a list (up to `MAX_INSERT_ROWS`). A batch is atomic.
 The body is validated against the table's real columns read from the Postgres
 catalog, so a typo returns a 400 naming the valid columns.
 
-### `GET /fire/arrival-grid` — fire spread
+### `GET` / `POST /fire/arrival-grid` — fire spread
 
 Not part of the asset-register contract, and not backed by the database. Takes
-an ignition `lat`/`lon`, builds a 40 × 40 km ELMFIRE landscape around it from
-the static tier (fuel, canopy, terrain, burn scars, barriers), fetches the
-Open-Meteo forecast and ensemble for the domain, runs one ELMFIRE case per
-ensemble member, and returns the arrival time and burn probability per 50 m
-cell on a lat/lon grid.
+an initial fire state — a point ignition `lat`/`lon`, or a `POST` body with an
+active **perimeter** (GeoJSON polygon) and/or a point — builds a 40 × 40 km
+ELMFIRE landscape around it from the static tier (fuel, canopy, terrain, burn
+scars, barriers), fetches the live Open-Meteo forecast and ensemble for the
+domain, runs one ELMFIRE case per ensemble member in the configured pipeline
+mode, and returns the arrival time and burn probability per 50 m cell on a
+lat/lon grid.
 
 ```bash
 curl "http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83&ensembleMembers=8"
+curl "http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83&mode=base"     # stock ELMFIRE knobs
+curl -X POST http://localhost:5102/fire/arrival-grid -H 'content-type: application/json' -d '{
+  "perimeter": {"type": "Polygon", "coordinates": [[[1.820,41.585],[1.835,41.585],[1.838,41.595],[1.825,41.598],[1.820,41.585]]]},
+  "durationHours": 6, "ensembleMembers": 8}'
 ```
 
 ```json
@@ -193,8 +203,27 @@ is the south-west corner of cell `[0][0]`. `0` is the ignition cell, `null`
 means no ensemble member reached it inside the horizon. `arrivalMinutes`,
 `arrivalMinutesP10/P90` and `burnProbability` are the same shape; the
 parameters (`durationHours`, `ensembleMembers`, `startTime`, `seed`,
-`spotting`, `debug`) and the full response are in
-[fire_spread/openapi.yaml](fire_spread/openapi.yaml).
+`spotting`, `mode`, `debug`) and the full response are in
+[fire_spread/openapi.yaml](fire_spread/openapi.yaml). With a perimeter, every
+cell inside it is burning at t 0 (arrival `0`, probability `1`) and ELMFIRE
+lights up to 100 points along its boundary; `physics.perimeterIgnitions` says
+how many. `physics.mode` and `physics.modeKnobs` say which knob bundle ran.
+
+**Pipeline modes.** Both run on the same inputs; they differ only in model
+knobs (`fire_spread/modes.py`):
+
+| Mode | Fuel table | Night damping | Wind gustiness | Live moisture | When |
+|---|---|---|---|---|---|
+| `base` | Scott & Burgan 40 as shipped with ELMFIRE | off (ELMFIRE default) | off | ELMFIRE constants (LH 60 / LW 60 / FMC 90 %) | reference: what stock ELMFIRE says |
+| `tuned` | Mediterranean re-parameterisation (garriga, maquia, *P. halepensis*, cereal stubble); ADJ 1.4 | on, overnight factor 0.7 | on (±10 % speed, ±18°) | monthly Catalan climatology | **default** (`PIPELINE_MODE`) |
+
+Mode is per request (`mode=`) or per deployment (`PIPELINE_MODE`); setting one
+of the knobs explicitly in the environment (`ADJ_FACTOR=0.8`) pins it in both
+modes. Whether `tuned` actually beats `base` is an empirical question the
+[evaluation loop](#evaluating-the-pipeline-modes) answers (2026-09-20: Jaccard
+0.20 vs 0.11, area bias 1.1× vs 3.9×, on 8 free-burning fires); do not add a
+tweak to `tuned` without running it. The bundle is set to over-burn slightly
+rather than under-burn.
 
 The code lives in `fire_spread/`, beside `app/` rather than inside it: it
 drives ELMFIRE and Open-Meteo and never opens a database connection, and it
@@ -210,10 +239,11 @@ ELMFIRE is an async subprocess.
 
 ### `GET /health`
 
-`{"status", "database", "fire_spread", "detail"}`. `fire_spread` is `ready`,
-`no elmfire` (binary missing from the image) or `no data` (static tier not
-built — run `scripts/setup_fire_data.sh`); it never degrades `status`, since
-the register does not depend on it. **The container's `HEALTHCHECK` depends
+`{"status", "database", "fire_spread", "fire_spread_mode", "detail"}`.
+`fire_spread` is `ready`, `no elmfire` (binary missing from the image) or `no
+data` (static tier not built — run `scripts/setup_fire_data.sh`);
+`fire_spread_mode` is the mode served by default. Neither degrades `status`,
+since the register does not depend on them. **The container's `HEALTHCHECK` depends
 on this route** — removing it breaks container health, and it is not in the
 contract, so do not "tidy" it away.
 
@@ -236,7 +266,8 @@ Every route, one envelope:
 | 504 | `upstream_timeout` | An ELMFIRE run did not finish in 15 minutes |
 
 `/fire/arrival-grid` also answers 400 when the ignition is outside Catalonia or
-on a non-burnable cell (urban, water, agriculture, barren) — the package raises
+on a non-burnable cell (urban, water, agriculture, barren), or when a perimeter
+touches no burnable cell or does not fit the 40 km domain — the package raises
 422 and the envelope maps it, like any validation error.
 
 Installed globally by `install_handlers()` in `app/errors.py`.
@@ -357,17 +388,37 @@ Nothing here needs a database except the last two.
 
 ```bash
 cd backend
-.venv/bin/pytest -q                       # ~150 tests, a few seconds; tests/fire_spread needs no ELMFIRE or data
-scripts/test_fire_spread.sh               # real ELMFIRE on a synthetic landscape, inside the container
+.venv/bin/pytest -q                       # ~180 tests, a few seconds; tests/fire_spread needs no ELMFIRE or data
+scripts/test_fire_spread.sh               # real ELMFIRE on a synthetic landscape, inside the container (8 tests)
 ```
 
 ```bash
 # The fire spread, end to end (needs the static tier: scripts/setup_fire_data.sh)
-curl -s "http://localhost:5102/health"                       # expect: "fire_spread": "ready"
+curl -s "http://localhost:5102/health"                       # expect: "fire_spread": "ready", "fire_spread_mode": "tuned"
 curl -s "http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83&ensembleMembers=4" | head -c 300
+curl -s "http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83&ensembleMembers=4&mode=base" | head -c 300
 curl -s -w '\n%{http_code}\n' "http://localhost:5102/fire/arrival-grid?lat=48&lon=2"
 # expect: {"error":{"code":"bad_request","message":"ignition outside ..."}} and 400
+scripts/evaluate_fire_spread.sh --limit 1 --members 2        # one historical fire through both modes (~3 min)
 ```
+
+#### Evaluating the pipeline modes
+
+`scripts/evaluate_fire_spread.sh` is the evaluation execution: it runs `base`
+and `tuned` through the *same* pipeline the API uses, but on **historical
+weather** (Open-Meteo's archive of past high-resolution forecast runs, or ERA5
+with `--weather archive`) for the fires in
+`scripts/fire_spread/eval_fires.json` — Catalan wildfires that burned free for
+long enough that a free-burning simulation is comparable with the DARP
+perimeter (Ribera d'Ebre 2019, Baldomar 2022, El Pont de Vilomara 2022, …).
+Each entry gives the ignition time and the free-burning horizon; both modes
+get the same fires, ignition points, weather and seeds. Output:
+`data/fire_spread/hindcast/eval_<timestamp>/{base,tuned}.csv`, `summary.json`
+and `summary.md` — per fire Jaccard / Sørensen / area bias / recall /
+precision against the observed perimeter plus ELMFIRE, preparation and
+wall-clock seconds, and per-mode aggregates with a "Jaccard wins" count. The
+whole set takes 30–60 minutes; paste the summary table into
+[docs/elmfire-pipe-assessment.md](../docs/elmfire-pipe-assessment.md).
 
 ```bash
 # The contract, end to end
@@ -478,6 +529,7 @@ Environment or `.env` (see `.env.example`). `.env` is gitignored.
 | `CORS_ORIGINS` | `["*"]` | Browser origins |
 | `API_PORT` | `5102` | Host port in `docker-compose.yml`. **Fixed by the contract** |
 | `DEEPFIRE_CLIENT_ID` / `DEEPFIRE_CLIENT_SECRET` | — | Deepfire credentials. Not used by this API any more (the fire spread is self-hosted); still passed through by compose for other Deepfire users |
+| `PIPELINE_MODE` | `tuned` | Model-knob bundle served by default: `tuned` (Catalan adjustments) or `base` (stock ELMFIRE); `fire_spread/modes.py` |
 | `ELMFIRE_NPROC` | `4` | MPI ranks (cores) per ELMFIRE run |
 | `MAX_CONCURRENT_RUNS` | `1` | Simulations in flight; beyond it `/fire/arrival-grid` answers 503 |
 | `KEEP_RUNS` | `failed` | ELMFIRE run directories to keep under `data/fire_spread/runs/`: `all`, `failed`, `none` |
@@ -550,10 +602,11 @@ backend/
 ├── docker-compose.yml           # db (postgres:18) + api, API on :5102; 2 GB /dev/shm for ELMFIRE
 ├── Dockerfile                   # the API image: ELMFIRE built in a stage, then main's Python image
 ├── pytest.ini                   # asyncio mode + the `elmfire` marker
-├── fire_spread/                 # GET /fire/arrival-grid — ELMFIRE + Open-Meteo, no database
-│   ├── router.py                # the endpoint, /fire/health, /fire/data-info
+├── fire_spread/                 # GET/POST /fire/arrival-grid — ELMFIRE + Open-Meteo, no database
+│   ├── router.py                # the endpoints, /fire/health, /fire/data-info, startup()
+│   ├── modes.py                 # base vs tuned knob bundles
 │   ├── pipeline.py              # request -> landscape -> weather -> ELMFIRE -> grid
-│   ├── landscape.py             # window the static tier, fuel remaps, ignition placement
+│   ├── landscape.py             # window the static tier, fuel remaps, point/perimeter ignition
 │   ├── weather.py               # Open-Meteo forecast/ensemble/archive, fuel moistures
 │   ├── elmfire_config.py        # writes elmfire.data + ignitions.csv
 │   ├── elmfire_runner.py        # mpirun elmfire as an async subprocess
@@ -587,7 +640,8 @@ backend/
 │   ├── setup_db.sh              # containers + schema + both register loads
 │   ├── setup_fire_data.sh       # the fire-spread static tier, in the api container
 │   ├── test_fire_spread.sh      # the ELMFIRE-marked tests, in the api container
-│   └── fire_spread/             # prepare_static_data.py, hindcast.py + batch/compare shells
+│   ├── evaluate_fire_spread.sh  # base vs tuned on historical fires, in the api container
+│   └── fire_spread/             # prepare_static_data.py, hindcast.py, evaluate.py + eval_fires.json
 ├── extract_buildings.py         # INSPIRE building GML  -> CSV
 ├── extract_forests.py           # INSPIRE forest GeoJSON -> CSV
 └── tests/

@@ -13,6 +13,7 @@ dead fuel moisture (%); ``to_bands`` does the conversion.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -393,11 +394,16 @@ class OpenMeteoProvider:
         client: httpx.AsyncClient | None = None,
         archive: bool = False,
         historical: bool = False,
+        retry_waits_s: tuple[float, ...] = (5.0, 15.0),
     ):
         """Hindcast modes (no ensemble; cases fall back to statistical wind perturbations):
         ``archive=True`` targets the ERA5(-Land) reanalysis endpoint (``/v1/archive`` on
         ``base_url``); ``historical=True`` targets past runs of the high-resolution forecast
-        models (``/v1/forecast`` on the historical-forecast host, ``best_match``)."""
+        models (``/v1/forecast`` on the historical-forecast host, ``best_match``).
+
+        ``retry_waits_s``: pauses before retrying a 429 (minutely rate limit) or 5xx answer,
+        one retry per entry; ``Retry-After`` wins when the server sends it. The live API keeps
+        this short; batch hindcasts pass longer waits."""
         self.base_url = base_url.rstrip("/")
         self.ensemble_base_url = ensemble_base_url.rstrip("/")
         self.ensemble_model = ensemble_model
@@ -405,17 +411,29 @@ class OpenMeteoProvider:
         self._client = client
         self.archive = archive
         self.historical = historical
+        self.retry_waits_s = tuple(retry_waits_s)
 
     @staticmethod
     def _fmt(t: datetime) -> str:
         return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:00")
 
     async def _get(self, client: httpx.AsyncClient, url: str, params: dict) -> list[dict]:
-        try:
-            r = await client.get(url, params=params, timeout=self.timeout_s)
-        except httpx.HTTPError as e:
-            raise WeatherProviderError(f"Open-Meteo request failed: {e}") from e
-        if r.status_code != 200:
+        for attempt in range(len(self.retry_waits_s) + 1):
+            try:
+                r = await client.get(url, params=params, timeout=self.timeout_s)
+            except httpx.HTTPError as e:
+                raise WeatherProviderError(f"Open-Meteo request failed: {e}") from e
+            if r.status_code == 200:
+                break
+            if (r.status_code == 429 or r.status_code >= 500) and attempt < len(self.retry_waits_s):
+                wait = self.retry_waits_s[attempt]
+                try:
+                    wait = max(wait, float(r.headers.get("retry-after", 0)))
+                except ValueError:
+                    pass
+                log.warning("Open-Meteo returned %d; retrying in %.0f s", r.status_code, wait)
+                await asyncio.sleep(wait)
+                continue
             raise WeatherProviderError(f"Open-Meteo returned {r.status_code}: {r.text[:200]}")
         try:
             doc = r.json()

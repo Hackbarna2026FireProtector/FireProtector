@@ -4,6 +4,6 @@ Mounted by app/main.py as ``app.include_router(router, prefix="/fire")``; reads 
 environment (fire_spread.settings) so it stays mountable on its own.
 """
 
-from .router import router
+from .router import router, startup
 
-__all__ = ["router"]
+__all__ = ["router", "startup"]

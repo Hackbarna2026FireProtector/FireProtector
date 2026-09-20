@@ -5,7 +5,24 @@ piece is, and what the hindcast says. Update the **Status** table and the **Hind
 something changes; keep the rest short. Namelist names are verbatim; "ours" is what the pipeline
 writes into `elmfire.data` (see `fire_spread/elmfire_config.py`).
 
-_Last updated 2026-09-20 · ELMFIRE main @ `cbf924a` · tier 50 m._
+_Last updated 2026-09-20 · ELMFIRE main @ `cbf924a` · tier 50 m · modes `base` / `tuned`._
+
+## 0. Pipeline modes
+
+The service runs one of two knob bundles (`fire_spread/modes.py`; `PIPELINE_MODE`, default
+`tuned`; `?mode=` per request). Both use every input in §1 unchanged; §2 describes `tuned`.
+
+| Knob | `base` (ELMFIRE namelist default) | `tuned` (ours) |
+|---|---|---|
+| `FUEL_MODEL_FILE` | Scott & Burgan 40 as shipped | `mediterranean` re-parameterisation |
+| `USE_DIURNAL_ADJUSTMENT_FACTOR` / `OVERNIGHT_ADJUSTMENT_FACTOR` | F / 0.1 | T / 0.7 |
+| `WIND_FLUCTUATIONS` (0.2 speed, 0.1 direction, 30 s) | F | T |
+| `LH/LW/FOLIAR_MOISTURE_CONTENT` | 60 / 60 / 90 % constant | monthly Catalan climatology |
+| `ADJ` | 1.0 | 1.4 (fitted on the free-burning set, §7) |
+| `MAX_LOW` | 8 | 8 |
+
+`scripts/evaluate_fire_spread.sh` scores both on the free-burning set in
+`scripts/fire_spread/eval_fires.json` (§7). A tweak enters `tuned` only through that loop.
 
 ## 1. Inputs
 
@@ -16,7 +33,7 @@ Grades: **good** fit for purpose · **ok** usable, known bias · **weak** domina
 | `FBFM` fuel model | S&B 40 / Anderson 13 codes | ZAFM-DW 2026 (10 m → 50 m mode); DARP scars < 2 y → NB9, 2–6 y → GR2 | **weak** | Global Dynamic-World product, not field-validated. SH7 (chaparral) dominant shrub class; GR4 = *all* agriculture incl. irrigated orchards; 33 % of "shrub" cells have LiDAR canopy ≥ 40 %. |
 | `DEM/SLP/ASP` | m, deg, deg | Copernicus GLO-30 → gdaldem | ok | Surface model: slope inflated at forest edges. ICGC 2 m DTM → fix + 30 m tier. |
 | `CC/CH/CBH/CBD` | %, m×10, m×10, kg m⁻³×100 | ICGC/CREAF LiDAR 2016–17 | ok | Cover/height measured. CBH = 0.4·HM, CBD = biomass/(HM−CBH) are heuristics; 9–10 y old. |
-| `ADJ` spread multiplier | Float32 | `ADJ_FACTOR` (default 1.0), uniform | ok | Primary calibration surface; global scalar only so far. |
+| `ADJ` spread multiplier | Float32 | `ADJ_FACTOR` (1.4 in `tuned`, 1.0 in `base`), uniform | ok | Primary calibration surface; global scalar only so far. |
 | `PHI` initial fire | < 0 burning | 1.0 (CSV ignition) | good | Perimeter ignition is one raster away. |
 | `BARRIER` | width m | OSM roads + waterways by class | ok | Class-average widths; field margins / firebreak strips missing. |
 | `WS/WD` | 20 ft mph (10 m accepted) | Open-Meteo best_match (AROME 1.3 km) 4×4 grid + ICON-EU-EPS members | **weak** | Not terrain-adjusted: no channelling / ridge speed-up (WindNinja). |
@@ -32,8 +49,8 @@ Grades: **good** fit for purpose · **ok** usable, known bias · **weak** domina
 `USE_BARRIERS` T if `barrier.tif` · `SURFACE_SPREAD_MODEL` ROTHERMEL · live moisture constant.
 
 **TIME_CONTROL** `SIMULATION_TSTART` = minute offset into the ignition hour, `TSTOP` = +duration ·
-`DT/DTMAX/CFL` 5/300/0.4 · `USE_DIURNAL_ADJUSTMENT_FACTOR` T, `OVERNIGHT_ADJUSTMENT_FACTOR` 0.4
-(default 0.1), burn period 10 h / 0.667 · `FORECAST_START_HOUR`, `CURRENT_YEAR`, `HOUR_OF_YEAR` real
+`DT/DTMAX/CFL` 5/300/0.4 · `USE_DIURNAL_ADJUSTMENT_FACTOR` T, `OVERNIGHT_ADJUSTMENT_FACTOR` 0.7
+(default 0.1; 0.4 double-counted the night with the hourly lagged moisture, §7), burn period 10 h / 0.667 · `FORECAST_START_HOUR`, `CURRENT_YEAR`, `HOUR_OF_YEAR` real
 (UTC; sunrise/sunset computed by ELMFIRE at the domain corner).
 
 **SIMULATOR** `NUM_IGNITIONS` 0 (CSV path) · `CROWN_FIRE_MODEL` 1 (Cruz), `CRITICAL_CANOPY_COVER`
@@ -85,10 +102,12 @@ cells are walls; pyrome tables empty.
 
 | Item | State | Since |
 |---|---|---|
-| Hindcast loop (`scripts/fire_spread/hindcast.py`) | built; DARP perimeters, ERA5 archive weather, Jaccard/Sørensen/bias | 2026-09-20 |
-| Global `ADJ` calibration | blocked: bias is suppression-dominated; needs free-burning subset or extended-attack model first | 2026-09-20 |
+| Hindcast loop (`scripts/fire_spread/hindcast.py`) | built; DARP perimeters, historical-forecast or ERA5 weather, Jaccard/Sørensen/bias, `--mode` | 2026-09-20 |
+| Evaluation execution (`scripts/fire_spread/evaluate.py`) | built; base vs tuned, paired per fire, timing; first run in §7 | 2026-09-20 |
+| Active-perimeter fire state (`POST /fire/arrival-grid`) | built; ≤100 fixed boundary ignitions (PHI raster is ignored on the random-ignition path) | 2026-09-20 |
+| Global `ADJ` calibration | done on the free-burning set: `tuned` ADJ 1.4 (§7); a preference for slight over-burn | 2026-09-20 |
 | Pyrome × fuel tables | not started | |
-| Fuel set decision (`scott_burgan` vs `mediterranean`) | first batch favours `mediterranean` (J 0.177 vs 0.155, bias 2.8 vs 4.6); default unchanged pending a suppression-aware rerun | 2026-09-20 |
+| Fuel set decision (`scott_burgan` vs `mediterranean`) | `mediterranean` is the `tuned` default: J 0.177 vs 0.155 on the 18-fire batch, and `tuned` beats `base` 6/8 on the free-burning set (§7) | 2026-09-20 |
 | WindNinja | not started | |
 | Catalan fuel map crosswalk | not started | |
 | Spotting validation | not started | |
@@ -131,3 +150,53 @@ What the first batch says:
 
 Reference for expectations: CloudFire's CONUS validation (WildfireAV) reports mean Jaccard 0.178,
 Sørensen 0.278 for ELMFIRE (FARSITE 0.176 / 0.274).
+
+## 7. Evaluation log: base vs tuned (free-burning fires)
+
+`scripts/evaluate_fire_spread.sh` — same pipeline as the API on Open-Meteo historical
+forecasts, ignition-year scar ignored, per-fire ignition time and free-burning horizon from
+`eval_fires.json` (approximate), same seeds in both modes. Full tables in
+`backend/data/fire_spread/hindcast/eval_<ts>/summary.md`.
+
+| Date | Fires | Mode | Jaccard mean / median | Sørensen | Bias median (p25–p75) | Recall / precision | Wall s median (max) | ELMFIRE s median |
+|---|---|---|---|---|---|---|---|---|
+| 2026-09-20 | 8, 4 members, pmin 0.5, historical wx | `base` | 0.113 / 0.092 | 0.192 | 3.90 (2.20–10.21) | 0.65 / 0.20 | 34 (111) | 29 |
+| 2026-09-20 | same | `tuned` v1: med fuels, night 0.4, ADJ 1.0 | 0.199 / 0.208 | 0.308 | 0.53 (0.20–1.42) | 0.39 / 0.45 | 23 (45) | 17 |
+| 2026-09-20 | same | tuned, night 0.7 | 0.201 / 0.197 | 0.310 | 0.60 (0.22–1.73) | 0.41 / 0.44 | 21 (59) | 16 |
+| 2026-09-20 | same | tuned, no night damping | 0.201 / 0.190 | 0.310 | 0.69 (0.23–2.04) | 0.44 / 0.42 | 23 (46) | 16 |
+| 2026-09-20 | same | tuned, night 0.7 + ADJ 1.3 | 0.206 / 0.174 | 0.316 | 0.88 (0.27–2.82) | 0.49 / 0.40 | 27 (64) | 22 |
+| 2026-09-20 | same | **`tuned` v2: night 0.7 + ADJ 1.4** (current) | **0.204** / 0.175 | **0.314** | **1.12** (0.36–3.27) | 0.52 / 0.37 | 26 (116) | 21 |
+| 2026-09-20 | same | tuned, night 0.7 + ADJ 1.5 | 0.189 / 0.151 | 0.296 | 1.49 (0.40–3.96) | 0.55 / 0.34 | 24 (79) | 18 |
+
+Jaccard wins (v2 vs base): tuned 6, base 2. Per fire (pred ha / J / bias, base → tuned v2):
+Ribera d'Ebre 2019 36 h 17 406 / 0.22 / 2.86 → 17 243 / 0.21 / 2.84; Baldomar 2022 30 h
+33 580 / 0.08 / 12.5 → 12 257 / 0.22 / 4.6; Castellar de la Ribera 2022 3 066 / 0.10 / 9.5 →
+485 / **0.43** / 1.49; Corbera d'Ebre 2022 5 686 / 0.07 / 15.2 → 2 717 / 0.14 / 7.3; Portbou
+2023 1 334 / 0.28 / 2.8 → 367 / **0.44** / 0.76; Santa Coloma de Queralt 2021 8 393 / 0.13 /
+4.9 → 732 / 0.04 / 0.43; El Pont de Vilomara 2022 9 / 0.00 → 251 / 0.12 / 0.16; Batea 2024
+242 / 0.02 / 0.56 → 52 / 0.03 / 0.12. Per-variant tables: `eval_v_*/summary.md`.
+
+What it says:
+
+- **`base` over-predicts by 4× median**: without night damping the fire keeps running through
+  the night at daytime rates, and the chaparral shrub loads burn Catalan garriga far too hot.
+- **`tuned` v1 over-corrected** (bias 0.53, recall 0.39). The night factor was not the cause:
+  0.7 or off moved the median bias only to 0.60–0.69, because the hourly RH-driven lagged dead
+  fuel moisture already recovers at night — ELMFIRE's factor was written for users without
+  hourly weather, so 0.4 damped twice. The Mediterranean table's lighter, shallower shrub beds
+  are the real cut (its higher moisture of extinction works the *other* way: less damping).
+- **ADJ is the lever, and 1.4 is the knee**: 1.3 → bias 0.88 / J 0.206, 1.4 → 1.12 / 0.204,
+  1.5 → 1.49 / 0.189. We prefer a little over-burn to under-burn, so v2 = night 0.7 + ADJ 1.4:
+  recall 0.39 → 0.52 for ~the same Jaccard. Note that the ensemble's ADJ perturbation
+  (−0.2..+0.25) sits on top: cases run at 1.2–1.65.
+- **The recall floor is direction, not speed**: Santa Coloma, Batea and Vilomara predict
+  hundreds of ha with J ≤ 0.12 — the simulated fire runs the wrong way (wind not
+  terrain-adjusted, ignition vertex guessed, spotting off). No scalar fixes those; WindNinja
+  and a spotting run are the next candidates, judged on this same table. Baldomar (30 h) and
+  Corbera (18 h) over-predict in every variant: their "free-burning" horizons in
+  `eval_fires.json` probably include hours of effective attack — shorten them if Bombers logs
+  say so.
+- **Timing**: both modes do the same work; ELMFIRE time follows burned area (base 34 s, tuned
+  21 s median). Preparation (weather + rasters) is ~6 s in both. No knob changes the time step.
+- The set is 8 fires with approximate ignition times; the signal (6/8, bias 3.9 → 1.1) is far
+  larger than that noise, but do not read the third decimal.

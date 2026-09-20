@@ -12,6 +12,11 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("data/fire_spread/catalonia")
     runs_dir: Path = Path("data/fire_spread/runs")
+    # Which bundle of model knobs the API serves: "base" = stock ELMFIRE physics, "tuned" =
+    # our Mediterranean/Catalan adjustments (fire_spread/modes.py). Requests may override
+    # per call (?mode=); the evaluation loop runs both. The knobs a mode controls are
+    # marked (mode) below; set one explicitly to pin it in both modes.
+    pipeline_mode: Literal["base", "tuned"] = "tuned"
     elmfire_nproc: int = 4
     elmfire_timeout_s: float = 15 * 60
     open_meteo_base_url: str = "https://api.open-meteo.com"
@@ -34,20 +39,22 @@ class Settings(BaseSettings):
     weather_bilinear: bool = True  # ELMFIRE-side bilinear interpolation of the weather grid
     weather_ensemble: bool = True  # run cases on real NWP ensemble members when available
     weather_history_hours: int = 48  # spin-up for the time-lagged 10-h / 100-h fuel moistures
-    lh_moisture_pct: float | None = None  # None -> monthly climatology (weather.live_fuel_moisture)
-    lw_moisture_pct: float | None = None
-    foliar_moisture_pct: float | None = None  # None -> monthly climatology (weather.foliar_moisture)
+    lh_moisture_pct: float | None = None  # (mode) None -> monthly climatology (weather.live_fuel_moisture)
+    lw_moisture_pct: float | None = None  # (mode)
+    foliar_moisture_pct: float | None = None  # (mode) None -> monthly climatology (weather.foliar_moisture)
 
     # --- physics ---
     hindcast: bool = False  # ignore burn scars of the ignition year (the simulated fire is in burnyear.tif)
-    adj_factor: float = 1.0  # global spread-rate multiplier (ADJ raster); first calibration knob
+    adj_factor: float = 1.0  # (mode) global spread-rate multiplier (ADJ raster); first calibration knob
     use_barriers: bool = True  # if data_dir/barrier.tif exists (roads/rivers width raster)
-    diurnal_adjustment: bool = True  # Rothermel night-time over-prediction damping
-    overnight_adjustment_factor: float = 0.4  # ELMFIRE default 0.1 is aggressive for shrub fuels
-    max_low: float = 8.0  # cap on fire-ellipse length/width (lower = fewer cigar fires)
+    diurnal_adjustment: bool = True  # (mode) Rothermel night-time over-prediction damping
+    overnight_adjustment_factor: float = 0.7  # (mode) ELMFIRE default 0.1 double-counts the night with hourly moisture
+    max_low: float = 8.0  # (mode) cap on fire-ellipse length/width (lower = fewer cigar fires)
+    wind_fluctuations: bool = True  # (mode) ELMFIRE's sub-hourly wind gustiness (±10 % speed, ±18°)
     crown_ratio: float = 1.0
     spotting_default: bool = False  # ember transport (expensive); requests can override
-    fuel_model_set: Literal["scott_burgan", "mediterranean"] = "scott_burgan"  # see fire_spread/fuels.py
+    fuel_model_set: Literal["scott_burgan", "mediterranean"] = "scott_burgan"  # (mode) see fire_spread/fuels.py
+    perimeter_max_ignitions: int = 100  # ELMFIRE caps fixed ignition points at 100 (ALREADY_IGNITED(1:100))
 
     @property
     def barrier_path(self) -> Path:

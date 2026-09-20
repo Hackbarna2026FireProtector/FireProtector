@@ -28,6 +28,11 @@ ELMFIRE semantics that shape the choices here:
   on main). So ``forecast_start_hour_utc`` is the UTC hour of band 1 and, with several
   weather blocks, ``bands_per_block`` must be a multiple of 24.
 * ``WS_AT_10M = .TRUE.`` makes ELMFIRE scale 10 m wind to 20 ft (x0.87).
+* An active perimeter cannot come through the ``PHI`` raster: on the random/CSV ignition
+  path ELMFIRE never copies ``PHI0`` into the level set (elmfire_level_set.f90, ``IF (.NOT.
+  RANDOM_IGNITIONS) PHIP = PHI0``). The &SIMULATOR fixed ignitions ``X_IGN/Y_IGN/T_IGN``
+  *are* applied in every case (at most 100: ``ALREADY_IGNITED(1:100)``), so a perimeter is
+  written as up to 100 points along its boundary, all igniting at ``SIMULATION_TSTART``.
 """
 
 from __future__ import annotations
@@ -69,7 +74,7 @@ class ElmfireParams:
     forecast_start_hour_utc: float = 0.0
     current_year: int = 2026
     hour_of_year: int = 0
-    overnight_adjustment_factor: float = 0.4
+    overnight_adjustment_factor: float = 0.7
     burn_period_length_h: float = 10.0
     burn_period_center_frac: float = 0.667
     # numerics
@@ -89,6 +94,8 @@ class ElmfireParams:
     spotting: bool = False
     max_runtime_s: float | None = None
     perturbations: list[Perturbation] = field(default_factory=list)
+    # extra fixed ignition points (x, y) lit at tstart in every case: an active perimeter
+    extra_ignitions: list[tuple[float, float]] = field(default_factory=list)
     inputs_dir: str = "./inputs"
     weather_dir: str = "./weather"
     outputs_dir: str = "./outputs"
@@ -128,6 +135,9 @@ def render_ignitions_csv(p: ElmfireParams) -> str:
     for k in range(1, p.cases + 1):
         lines.append(f"{k},{start_band(k, p.weather_members, p.bands_per_block)},{p.x_ign:.1f},{p.y_ign:.1f},1e9,-1")
     return "\n".join(lines) + "\n"
+
+
+MAX_FIXED_IGNITIONS = 100  # ALREADY_IGNITED(1:100) in elmfire_level_set.f90
 
 
 def _b(v: bool) -> str:
@@ -205,7 +215,13 @@ def render(p: ElmfireParams) -> str:
     add("")
 
     add("&SIMULATOR")
-    add("NUM_IGNITIONS = 0")
+    if len(p.extra_ignitions) > MAX_FIXED_IGNITIONS:
+        raise ValueError(f"ELMFIRE accepts at most {MAX_FIXED_IGNITIONS} fixed ignition points")
+    add(f"NUM_IGNITIONS = {len(p.extra_ignitions)}")
+    for i, (x, y) in enumerate(p.extra_ignitions, start=1):
+        add(f"X_IGN({i}) = {x:.1f}")
+        add(f"Y_IGN({i}) = {y:.1f}")
+        add(f"T_IGN({i}) = {p.tstart_s:.1f}")
     add(f"CROWN_FIRE_MODEL = {p.crown_fire_model}")
     add(f"CROWN_RATIO = {p.crown_ratio:.2f}")
     add(f"CRITICAL_CANOPY_COVER = {p.critical_canopy_cover:.2f}")

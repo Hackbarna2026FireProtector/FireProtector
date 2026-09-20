@@ -4,12 +4,17 @@
 Run inside the container (needs ELMFIRE + ogr2ogr + the static tier), from ``backend/``:
 
     docker compose run --rm api python -m scripts.fire_spread.hindcast --min-ha 100 --limit 10
-    ... hindcast --fuels mediterranean --adj 0.8 --years 2019-2024
+    ... hindcast --mode base --years 2019-2024        # stock ELMFIRE knobs (fire_spread/modes.py)
+    ... hindcast --mode tuned --adj 0.8               # a mode plus one knob override
+
+``scripts/fire_spread/evaluate.py`` drives this module for both modes on the curated
+free-burning fire set and writes the comparison.
 
 Per fire: perimeter + date from ``data/fire_spread/raw/incendis/<year>/*.shp`` (converted once to
-``<year>/*.4326.geojson``) → ERA5 archive weather at the centroid → ignition at
+``<year>/*.4326.geojson``) → historical weather at the centroid (past forecast runs, or ERA5 with
+``--weather archive``) → ignition at
 the most upwind burnable point of the perimeter (DARP has no ignition point or time; 12:00 UTC
-assumed) → pipeline run (archive weather, statistical wind perturbations) → burn probability
+assumed) → pipeline run (statistical wind perturbations: no past ensemble) → burn probability
 ≥ ``--pmin`` vs the observed perimeter: Jaccard, Sørensen, area bias. Results in
 ``data/fire_spread/hindcast/<tag>.csv`` and a summary line to paste into docs/elmfire-pipe-assessment.md.
 """
@@ -35,6 +40,7 @@ from shapely.ops import transform as shp_transform
 
 from fire_spread import landscape as ls, weather as wx
 from fire_spread.models import Ignition, OutsideCoverage, PipelineError, SimulationRequest
+from fire_spread.modes import MODES, apply_mode
 from fire_spread.pipeline import Pipeline
 from fire_spread.settings import Settings
 
@@ -124,13 +130,17 @@ def score(grid, geom_lonlat, obs_area_m2: float, pmin: float) -> dict:
 
 
 async def run_case(pipe: Pipeline, provider: wx.OpenMeteoProvider, fire: dict, hours: int, members: int, spotting: bool,
-                   pmin: float, ign_hour: int = IGNITION_HOUR_UTC) -> dict:
-    start = fire["date"].replace(hour=ign_hour, tzinfo=timezone.utc)
+                   pmin: float, ign_hour: int = IGNITION_HOUR_UTC, start: datetime | None = None,
+                   ignition: tuple[float, float] | None = None) -> dict:
+    """One fire through the pipeline. ``start`` (UTC) and ``ignition`` (lat, lon) override the
+    DARP-derived defaults (date at ``ign_hour``, upwind-most burnable vertex) when known."""
+    start = start or fire["date"].replace(hour=ign_hour, tzinfo=timezone.utc)
     c = fire["geom"].centroid
     wxr = await provider.fetch([(c.y, c.x)], start, 9)
     downwind = wx.mean_downwind_unit(wxr.forecast())
     last: Exception | None = None
-    for x, y in upwind_candidates(fire["geom_xy"], downwind):
+    candidates = [ls.lonlat_to_xy(ignition[1], ignition[0])] if ignition else upwind_candidates(fire["geom_xy"], downwind)
+    for x, y in candidates:
         lon, lat = ls.xy_to_lonlat(x, y)
         req = SimulationRequest(Ignition(lat, lon), duration_hours=hours, ensemble_members=members,
                                 start_time=start, seed=int(fire["code"][-6:]) or 1, spotting=spotting, debug=True)
@@ -141,12 +151,34 @@ async def run_case(pipe: Pipeline, provider: wx.OpenMeteoProvider, fire: dict, h
             last = e
             continue
         res = {"code": fire["code"], "date": fire["date"].date().isoformat(), "municipality": fire["municipality"],
+               "mode": pipe.mode, "start_utc": start.isoformat(), "hours": hours,
                "ign_lat": round(lat, 5), "ign_lon": round(lon, 5), "wind_ms": round(grid.weather.windSpeedAvgMs, 1),
                "wind_dir": round(grid.weather.windDirectionAvg), "m1_pct": round(grid.weather.fuelMoisture1hAvgPct or 0, 1),
                **score(grid, fire["geom"], fire["geom_xy"].area, pmin),
-               "elmfire_s": round(grid.debug.timings.get("elmfire_s", 0.0), 1), "wall_s": round(time.perf_counter() - t0, 1)}
+               "elmfire_s": round(grid.debug.timings.get("elmfire_s", 0.0), 1),
+               "prep_s": round(sum(v for k, v in grid.debug.timings.items() if k != "elmfire_s"), 1),
+               "wall_s": round(time.perf_counter() - t0, 1)}
         return res
     raise last or OutsideCoverage("no burnable ignition candidate")
+
+
+def build_settings(mode: str | None, *, fuels: str | None = None, adj: float | None = None,
+                   max_low: float | None = None, **fixed) -> Settings:
+    """Hindcast settings: no run dirs kept, statistical wind perturbations (no NWP ensemble
+    in the past), ignition-year burn scars ignored; the mode's knobs, then explicit
+    overrides (which ``apply_mode`` keeps because they count as explicitly set)."""
+    explicit = {k: v for k, v in (("fuel_model_set", fuels), ("adj_factor", adj), ("max_low", max_low)) if v is not None}
+    return apply_mode(Settings(keep_runs="none", weather_ensemble=False, hindcast=True, **fixed, **explicit), mode)
+
+
+def weather_provider(kind: str) -> wx.OpenMeteoProvider:
+    """``historical`` = past runs of the high-resolution forecast models (what the live API
+    would have seen), ``archive`` = ERA5 reanalysis."""
+    # Batches hit Open-Meteo's minutely limit: wait it out rather than skip the fire.
+    waits = (15.0, 65.0, 65.0)
+    if kind == "archive":
+        return wx.OpenMeteoProvider("https://archive-api.open-meteo.com", archive=True, retry_waits_s=waits)
+    return wx.OpenMeteoProvider("https://historical-forecast-api.open-meteo.com", historical=True, retry_waits_s=waits)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,14 +190,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hours", type=int, default=24)
     ap.add_argument("--members", type=int, default=4)
     ap.add_argument("--pmin", type=float, default=0.5, help="burn probability counted as burned")
-    ap.add_argument("--fuels", choices=("scott_burgan", "mediterranean"), default="scott_burgan")
-    ap.add_argument("--adj", type=float, default=1.0, help="global ADJ spread-rate multiplier")
+    ap.add_argument("--mode", choices=MODES, default=None, help="knob bundle from fire_spread/modes.py (default: PIPELINE_MODE)")
+    ap.add_argument("--fuels", choices=("scott_burgan", "mediterranean"), default=None, help="override the mode's fuel set")
+    ap.add_argument("--adj", type=float, default=None, help="override the mode's ADJ spread-rate multiplier")
     ap.add_argument("--spotting", action="store_true")
     ap.add_argument("--no-barriers", action="store_true")
     ap.add_argument("--weather", choices=("historical", "archive"), default="historical",
                     help="historical = past high-res forecast runs (default), archive = ERA5 reanalysis")
     ap.add_argument("--ign-hour", type=int, default=IGNITION_HOUR_UTC, help="assumed ignition hour (UTC)")
-    ap.add_argument("--max-low", type=float, default=8.0, help="fire ellipse length/width cap")
+    ap.add_argument("--max-low", type=float, default=None, help="override the mode's fire ellipse length/width cap")
     ap.add_argument("--tag", default=None, help="results file name (default from settings)")
     a = ap.parse_args(argv)
 
@@ -180,14 +213,12 @@ def main(argv: list[str] | None = None) -> int:
     if not fires:
         raise SystemExit("no fires selected")
 
-    settings = Settings(keep_runs="none", weather_ensemble=False, hindcast=True, fuel_model_set=a.fuels, adj_factor=a.adj,
-                        use_barriers=not a.no_barriers, spotting_default=a.spotting, max_low=a.max_low)
-    if a.weather == "archive":
-        provider = wx.OpenMeteoProvider("https://archive-api.open-meteo.com", archive=True)
-    else:
-        provider = wx.OpenMeteoProvider("https://historical-forecast-api.open-meteo.com", historical=True)
+    settings = build_settings(a.mode, fuels=a.fuels, adj=a.adj, max_low=a.max_low,
+                              use_barriers=not a.no_barriers, spotting_default=a.spotting)
+    provider = weather_provider(a.weather)
     pipe = Pipeline(settings=settings, weather_provider=provider)
-    tag = a.tag or (f"{a.fuels}_adj{a.adj:g}_h{a.hours}_{a.weather}_ign{a.ign_hour}_low{a.max_low:g}"
+    s = pipe.settings
+    tag = a.tag or (f"{s.pipeline_mode}_{s.fuel_model_set}_adj{s.adj_factor:g}_h{a.hours}_{a.weather}_ign{a.ign_hour}_low{s.max_low:g}"
                     f"{'_spot' if a.spotting else ''}{'_nobar' if a.no_barriers else ''}")
     OUT.mkdir(parents=True, exist_ok=True)
     out_csv = OUT / f"{tag}.csv"

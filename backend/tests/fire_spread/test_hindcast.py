@@ -36,3 +36,17 @@ def test_upwind_candidates():
     assert all(x < 200 for x, _ in east) and len(east) == hc.CANDIDATES  # densified west edge
     calm = hc.upwind_candidates(sq, None)
     assert calm[0] == (500.0, 500.0)
+
+
+def test_build_settings_applies_mode_then_overrides():
+    s = hc.build_settings("base")
+    assert (s.pipeline_mode, s.fuel_model_set, s.diurnal_adjustment) == ("base", "scott_burgan", False)
+    assert s.keep_runs == "none" and s.weather_ensemble is False and s.hindcast is True
+    s = hc.build_settings("tuned", adj=0.8, fuels="scott_burgan", spotting_default=True)
+    assert (s.pipeline_mode, s.fuel_model_set, s.adj_factor, s.spotting_default) == ("tuned", "scott_burgan", 0.8, True)
+    assert s.diurnal_adjustment is True  # the rest of the bundle still applies
+
+
+def test_weather_provider_kinds():
+    assert hc.weather_provider("archive").archive and not hc.weather_provider("archive").historical
+    assert hc.weather_provider("historical").historical and "historical-forecast-api" in hc.weather_provider("historical").base_url

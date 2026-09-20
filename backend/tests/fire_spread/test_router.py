@@ -34,7 +34,7 @@ def _grid(**kw) -> ArrivalGrid:
 
 class FakePipeline:
     def __init__(self, outcome, delay=0.0):
-        self.outcome, self.delay, self.calls = outcome, delay, []
+        self.outcome, self.delay, self.calls, self.modes = outcome, delay, [], []
 
     async def run(self, req, **kw):
         self.calls.append(req)
@@ -53,7 +53,12 @@ def app(monkeypatch, tmp_path):
         settings.setdefault("data_dir", tmp_path)
         (settings["data_dir"] / "dem.tif").touch()
         s = Settings(acquire_timeout_s=0.05, **settings)
-        monkeypatch.setattr(r, "get_pipeline", lambda: fake)
+
+        def pipeline_for(mode=None):
+            fake.modes.append(mode)
+            return fake
+
+        monkeypatch.setattr(r, "get_pipeline", pipeline_for)
         monkeypatch.setattr(r, "get_settings", lambda: s)
         r.get_semaphore.cache_clear()
         app = FastAPI()
@@ -78,6 +83,7 @@ async def test_ok_and_schema(app):
     assert "debug" not in body
     req = fake.calls[0]
     assert (req.ignition.lat, req.ignition.lon, req.ensemble_members, req.duration_hours) == (41.59, 1.83, 2, 24)
+    assert req.mode is None and fake.modes == ["tuned"]  # the configured default mode
 
     spec = yaml.safe_load(OPENAPI.read_text(encoding="utf-8"))
     schema = {**spec["components"]["schemas"]["ArrivalGrid"], "components": spec["components"]}
@@ -90,6 +96,49 @@ async def test_query_validation(app):
         assert (await c.get("/fire/arrival-grid", params={"lat": 91, "lon": 0})).status_code == 422
         assert (await c.get("/fire/arrival-grid", params={"lat": 41, "lon": 1, "ensembleMembers": 65})).status_code == 422
         assert (await c.get("/fire/arrival-grid", params={"lat": 41, "lon": 1, "durationHours": 0})).status_code == 422
+        assert (await c.get("/fire/arrival-grid", params={"lat": 41, "lon": 1, "mode": "fast"})).status_code == 422
+
+
+async def test_mode_override(app):
+    a, fake = app(_grid(), pipeline_mode="base")
+    async with _client(a) as c:
+        assert (await c.get("/fire/arrival-grid", params={"lat": 41.59, "lon": 1.83})).status_code == 200
+        assert (await c.get("/fire/arrival-grid", params={"lat": 41.59, "lon": 1.83, "mode": "tuned"})).status_code == 200
+        assert (await c.get("/fire/health")).json()["mode"] == "base"
+    assert fake.modes == ["base", "tuned"]
+    assert [req.mode for req in fake.calls] == [None, "tuned"]
+
+
+SQUARE = {"type": "Polygon", "coordinates": [[[1.82, 41.58], [1.84, 41.58], [1.84, 41.60], [1.82, 41.60], [1.82, 41.58]]]}
+
+
+async def test_post_fire_state_perimeter(app):
+    a, fake = app(_grid())
+    async with _client(a) as c:
+        res = await c.post("/fire/arrival-grid", json={"perimeter": SQUARE, "durationHours": 6, "ensembleMembers": 2, "mode": "base"})
+        assert res.status_code == 200, res.text
+        assert res.json()["arrivalMinutes"][0][1] == 30.5
+        # explicit reference point wins over the centroid
+        res = await c.post("/fire/arrival-grid", json={"ignition": {"lat": 41.59, "lon": 1.83}, "perimeter": SQUARE})
+        assert res.status_code == 200, res.text
+        # a bare point works through POST too
+        res = await c.post("/fire/arrival-grid", json={"ignition": {"lat": 41.59, "lon": 1.83}, "seed": 3})
+        assert res.status_code == 200, res.text
+    centroid, explicit, point = fake.calls
+    assert centroid.ignition.perimeter == SQUARE and centroid.duration_hours == 6 and centroid.mode == "base"
+    assert (round(centroid.ignition.lat, 3), round(centroid.ignition.lon, 3)) == (41.59, 1.83)
+    assert (explicit.ignition.lat, explicit.ignition.lon) == (41.59, 1.83) and explicit.ignition.is_perimeter
+    assert point.ignition.perimeter is None and point.seed == 3 and point.mode is None
+
+
+async def test_post_fire_state_validation(app):
+    a, fake = app(_grid())
+    async with _client(a) as c:
+        assert (await c.post("/fire/arrival-grid", json={"durationHours": 6})).status_code == 422
+        assert (await c.post("/fire/arrival-grid", json={"perimeter": {"type": "Point", "coordinates": [1, 41]}})).status_code == 422
+        assert (await c.post("/fire/arrival-grid", json={"perimeter": {"type": "Polygon", "coordinates": "nope"}})).status_code == 422
+        assert (await c.post("/fire/arrival-grid", json={"ignition": {"lat": 95, "lon": 1}})).status_code == 422
+    assert fake.calls == []
 
 
 @pytest.mark.parametrize(

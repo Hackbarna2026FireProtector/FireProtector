@@ -179,7 +179,36 @@ async def test_open_meteo_errors(failure):
     else:
         route.mock(return_value=httpx.Response(200, json={"error": True}))
     with pytest.raises(WeatherProviderError):
-        await wx.OpenMeteoProvider().fetch([(41.6, 1.8), (41.7, 1.9)], T0, 3)
+        await wx.OpenMeteoProvider(retry_waits_s=()).fetch([(41.6, 1.8), (41.7, 1.9)], T0, 3)
+
+
+@respx.mock
+async def test_open_meteo_retries_rate_limit(monkeypatch):
+    waits = []
+
+    async def fake_sleep(s):
+        waits.append(s)
+
+    monkeypatch.setattr(wx.asyncio, "sleep", fake_sleep)
+    route = respx.get("https://api.open-meteo.com/v1/forecast").mock(side_effect=[
+        httpx.Response(429, text="Minutely API request limit exceeded", headers={"retry-after": "7"}),
+        httpx.Response(503),
+        httpx.Response(200, json=_forecast_doc()),
+    ])
+    respx.get("https://ensemble-api.open-meteo.com/v1/ensemble").mock(return_value=httpx.Response(500))
+    r = await wx.OpenMeteoProvider(retry_waits_s=(2.0, 5.0)).fetch([(41.6, 1.8)], T0, 3)
+    assert route.call_count == 3 and len(r.members) == 1
+    # Retry-After wins over the configured wait, then the second wait; the ensemble 500 is retried too
+    assert waits == [7.0, 5.0, 2.0, 5.0]
+    # retries exhausted -> error; 4xx other than 429 is never retried
+    route.mock(return_value=httpx.Response(429, text="still"))
+    with pytest.raises(WeatherProviderError, match="429"):
+        await wx.OpenMeteoProvider(retry_waits_s=(1.0,)).fetch([(41.6, 1.8)], T0, 3)
+    route.mock(return_value=httpx.Response(400, text="bad"))
+    waits.clear()
+    with pytest.raises(WeatherProviderError, match="400"):
+        await wx.OpenMeteoProvider(retry_waits_s=(1.0,)).fetch([(41.6, 1.8)], T0, 3)
+    assert waits == []
 
 
 def test_mean_downwind_unit():

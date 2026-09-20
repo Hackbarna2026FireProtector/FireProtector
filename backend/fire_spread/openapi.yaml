@@ -2,16 +2,23 @@ openapi: 3.1.0
 info:
   title: Fire Spread API
   description: >
-    Self-hosted ELMFIRE fire-spread service for Catalonia. Given a point ignition,
+    Self-hosted ELMFIRE fire-spread service for Catalonia. Given an initial fire
+    state - a point ignition (GET) or a point and/or an active perimeter (POST) -
     runs a Monte Carlo ensemble of ELMFIRE simulations on open Catalan data (50 m
-    cells, 40x40 km domain placed downwind of the ignition) and returns a lat/lon grid with minute-level arrival
-    times and per-cell uncertainty (burn probability, P10/P90 arrival).
+    cells, 40x40 km domain placed downwind of the reference point) and the live
+    Open-Meteo forecast, and returns a lat/lon grid with minute-level arrival times
+    and per-cell uncertainty (burn probability, P10/P90 arrival).
+
+    Two pipeline modes share every input and differ only in model knobs: "base" is
+    stock ELMFIRE physics, "tuned" our Mediterranean/Catalan adjustments (fuel
+    table, night damping, wind gustiness, live-moisture climatology). The server
+    default is PIPELINE_MODE; each request may override it with "mode".
 
     Mounted at /fire inside the FireProtector API (backend/app), whose global
     error handlers apply: every error body is {"error": {"code", "message"}}
     rather than {"detail"} and 422 is reported as 400 (see backend/README.md,
     "Errors"). The status codes below are what the router itself raises.
-  version: "2.0.0"
+  version: "2.1.0"
 
 servers:
   - url: /fire
@@ -73,48 +80,57 @@ paths:
           required: false
           description: Enable ember transport (spot fires). Slower; default from server settings (off).
           schema: { type: boolean }
+        - name: mode
+          in: query
+          required: false
+          description: Pipeline mode for this run; default the server's PIPELINE_MODE.
+          schema: { $ref: "#/components/schemas/PipelineMode" }
         - name: debug
           in: query
           required: false
           description: Include run directory, timings and ELMFIRE stdout tail.
           schema: { type: boolean, default: false }
       responses:
-        "200":
-          description: Arrival grid computed successfully.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ArrivalGrid"
-        "422":
-          description: >
-            Validation error, or the ignition is outside the static-data coverage
-            (Catalonia) or on a non-burnable cell (urban, water, agriculture, barren).
-            Reported as 400 by the FireProtector API.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/HTTPError" }
-        "500":
-          description: ELMFIRE failed (see detail / run directory).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/HTTPError" }
-        "502":
-          description: Weather provider (Open-Meteo) failure.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/HTTPError" }
-        "503":
-          description: >
-            All simulation slots busy (retry later), or the static tier has not been
-            built yet (scripts/setup_fire_data.sh).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/HTTPError" }
-        "504":
-          description: ELMFIRE exceeded its time limit.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/HTTPError" }
+        "200": { $ref: "#/components/responses/ArrivalGridOK" }
+        "422": { $ref: "#/components/responses/InvalidFireState" }
+        "500": { $ref: "#/components/responses/ElmfireFailed" }
+        "502": { $ref: "#/components/responses/WeatherFailed" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "504": { $ref: "#/components/responses/ElmfireTimeout" }
+    post:
+      tags: [fire-spread]
+      summary: Simulate an initial fire state (point and/or active perimeter) and return the arrival grid
+      description: >
+        Same simulation as GET, from a JSON body. "perimeter" is the currently burning
+        area as a GeoJSON Polygon or MultiPolygon (WGS84 lon/lat): every cell inside it
+        is burning at t 0 (arrival 0, burnProbability 1) and ELMFIRE lights up to 100
+        points along its boundary (physics.perimeterIgnitions). The reference point -
+        domain placement, weather point, grid anchor - is "ignition" when given, else
+        the perimeter centroid. The perimeter must touch burnable fuel and fit the
+        40 km domain (about 10 km across).
+      operationId: arrivalGridFromState
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FireStateRequest" }
+            examples:
+              perimeter:
+                value:
+                  perimeter:
+                    type: Polygon
+                    coordinates: [[[1.820, 41.585], [1.835, 41.585], [1.838, 41.595], [1.825, 41.598], [1.820, 41.585]]]
+                  durationHours: 6
+                  ensembleMembers: 8
+              point:
+                value: { ignition: { lat: 41.59, lon: 1.83 }, mode: base }
+      responses:
+        "200": { $ref: "#/components/responses/ArrivalGridOK" }
+        "422": { $ref: "#/components/responses/InvalidFireState" }
+        "500": { $ref: "#/components/responses/ElmfireFailed" }
+        "502": { $ref: "#/components/responses/WeatherFailed" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "504": { $ref: "#/components/responses/ElmfireTimeout" }
 
   /health:
     get:
@@ -133,6 +149,7 @@ paths:
                   elmfire: { type: boolean }
                   dataDir: { type: string }
                   dataPresent: { type: boolean }
+                  mode: { $ref: "#/components/schemas/PipelineMode" }
 
   /data-info:
     get:
@@ -149,7 +166,80 @@ paths:
           description: Static data not prepared.
 
 components:
+  responses:
+    ArrivalGridOK:
+      description: Arrival grid computed successfully.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ArrivalGrid"
+    InvalidFireState:
+      description: >
+        Validation error, or the ignition is outside the static-data coverage
+        (Catalonia) or on a non-burnable cell (urban, water, agriculture, barren),
+        or the perimeter touches no burnable cell / does not fit the domain.
+        Reported as 400 by the FireProtector API.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/HTTPError" }
+    ElmfireFailed:
+      description: ELMFIRE failed (see detail / run directory).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/HTTPError" }
+    WeatherFailed:
+      description: Weather provider (Open-Meteo) failure.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/HTTPError" }
+    Unavailable:
+      description: >
+        All simulation slots busy (retry later), or the static tier has not been
+        built yet (scripts/setup_fire_data.sh).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/HTTPError" }
+    ElmfireTimeout:
+      description: ELMFIRE exceeded its time limit.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/HTTPError" }
+
   schemas:
+    PipelineMode:
+      type: string
+      enum: [base, tuned]
+      description: >
+        base = stock ELMFIRE physics (Scott & Burgan 40 table, ADJ 1.0, no diurnal
+        damping, no wind fluctuations, constant live moistures); tuned = the
+        Mediterranean fuel table, ADJ 1.4, overnight factor 0.7, wind fluctuations and
+        monthly live-moisture climatology. Same data in both.
+
+    FireStateRequest:
+      type: object
+      description: At least one of ignition / perimeter.
+      properties:
+        ignition:
+          type: object
+          required: [lat, lon]
+          properties:
+            lat: { type: number, format: double, minimum: -90, maximum: 90 }
+            lon: { type: number, format: double, minimum: -180, maximum: 180 }
+        perimeter:
+          type: object
+          description: GeoJSON Polygon or MultiPolygon geometry (WGS84 lon/lat) of the burning area.
+          required: [type, coordinates]
+          properties:
+            type: { type: string, enum: [Polygon, MultiPolygon] }
+            coordinates: { type: array }
+        durationHours: { type: integer, minimum: 1, maximum: 48, default: 24 }
+        ensembleMembers: { type: integer, minimum: 1, maximum: 64, default: 16 }
+        startTime: { type: string, format: date-time }
+        seed: { type: integer, minimum: 1 }
+        spotting: { type: boolean }
+        mode: { $ref: "#/components/schemas/PipelineMode" }
+        debug: { type: boolean, default: false }
+
     NullableIntGrid:
       type: array
       description: Rows south-to-north, each a list of columns west-to-east.
@@ -242,9 +332,12 @@ components:
         physics:
           type: object
           description: >
-            Model switches that shaped this run: spotting, barriers (OSM fire breaks
+            Model switches that shaped this run: mode (base|tuned) and modeKnobs (the
+            knob values that mode resolved to), spotting, barriers (OSM fire breaks
             available), diurnalAdjustment, sunriseUtc/sunsetUtc (h), weatherGrid (points
-            per side), cellSizeM, ignitionOffsetS (seconds into the ignition hour).
+            per side), cellSizeM, ignitionOffsetS (seconds into the ignition hour),
+            fuelModelSet, adjFactor, perimeterIgnitions (boundary points lit for a
+            perimeter request; 0 for a point).
           additionalProperties: true
         zone:
           $ref: "#/components/schemas/ZoneInfo"

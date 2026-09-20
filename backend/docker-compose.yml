@@ -75,6 +75,9 @@ services:
       # and run directories live on the data/fire_spread bind mount below;
       # scripts/setup_fire_data.sh builds the tier. See fire_spread/README.md
       # for the remaining knobs (all read from the environment / backend/.env).
+      # PIPELINE_MODE picks the model-knob bundle the API serves by default:
+      # base (stock ELMFIRE) or tuned (our Catalan adjustments, fire_spread/modes.py).
+      PIPELINE_MODE: ${PIPELINE_MODE:-tuned}
       ELMFIRE_NPROC: ${ELMFIRE_NPROC:-4}
       DATA_DIR: /srv/data/fire_spread/catalonia
       RUNS_DIR: /srv/data/fire_spread/runs
