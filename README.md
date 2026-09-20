@@ -100,18 +100,39 @@ placeholders](backend/README.md#replacing-the-placeholders).
 Needs **Docker**, **Python 3.11+** on the host for the loader, and **Node 20+**
 for the UI.
 
-From a fresh clone, in two terminals:
+From a fresh clone, one command:
+
+```bash
+cp backend/.env.example backend/.env     # optional; see below
+./start.sh
+```
+
+Then open **http://localhost:5173**.
+
+`start.sh` runs both halves from one terminal: it starts Postgres, loads both
+datasets if the database is empty (~11 minutes, once), brings the API up on
+:5102, installs the UI's dependencies and serves it on :5173, tagging the API's
+log `[api]` alongside Vite's. Ctrl-C stops the UI and leaves the containers
+running, so the next start takes seconds. `./start.sh --help` lists the rest:
+
+| | |
+| ------------------------------------ | --------------------------------------------------------- |
+| `./start.sh --prod`                  | production build of the UI instead of the dev server      |
+| `./start.sh --setup`                 | run the loader even when the register is already there    |
+| `./start.sh --setup -- --limit 10`   | ... with everything after `--` passed to `setup_db.sh`    |
+| `./start.sh --no-migrate`            | skip re-applying `db/init/*.sql` (~15 s faster)           |
+| `./start.sh --no-api-logs`           | leave the API's log out of this terminal                  |
+| `./start.sh --down`                  | stop the containers when the script exits                 |
+
+Each half still runs on its own, which is what `start.sh` does for you:
 
 ```bash
 # 1. backend — Postgres, the schema, both datasets, then the API on :5102
-cp backend/.env.example backend/.env     # optional; see below
 ./backend/scripts/setup_db.sh
 
 # 2. frontend — the UI on :5173, proxying to :5102
 cd frontend && npm install && npm run dev
 ```
-
-Then open **http://localhost:5173**.
 
 `backend/.env` is optional. Without `DEEPFIRE_CLIENT_ID`/`DEEPFIRE_CLIENT_SECRET`
 the app still runs: it serves the scenario bundles recorded under
@@ -193,6 +214,7 @@ backend/
 ├── extract_forests.py          # INSPIRE forest GeoJSON -> CSV
 ├── scripts/setup_db.sh         # one command: containers + schema + data
 └── tests/                      # 195 tests, no database and no network needed
+start.sh                        # both halves in one terminal (wraps setup_db.sh)
 frontend/src/
 ├── App.tsx                     # the command-centre layout
 ├── api/                        # client + react-query hooks

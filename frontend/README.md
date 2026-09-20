@@ -12,6 +12,7 @@ npm run dev     # http://localhost:5173
 It proxies to the API on **5102** — the port the asset-register contract fixes.
 Set `BACKEND_URL` to point somewhere else. Start the backend first
 (`cd ../backend && docker compose up -d`), or the app renders its error state.
+[`../start.sh`](../start.sh) does both halves in one terminal instead.
 
 | | |
 |---|---|
