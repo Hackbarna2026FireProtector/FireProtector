@@ -79,8 +79,23 @@ export interface ScoreSummary {
   cumulative_risk: { minute: number; risk: number }[];
 }
 
+/**
+ * Whether the ranking has any real names in it.
+ *
+ * Every row in the asset register is called "residential", so names come from
+ * a separate OpenStreetMap query. When that query fails the list is a ranking
+ * of anonymous buildings — true, but indistinguishable on screen from a list
+ * with no critical facilities nearby, which is why the UI has to say so.
+ */
+export interface NamedLayer {
+  available: boolean;
+  count: number;
+  error: string | null;
+}
+
 export interface ScoredResult extends FeatureCollection<Feature<Geometry, ScoredProps>> {
   summary: ScoreSummary;
+  named_layer?: NamedLayer;
 }
 
 export interface Perturbation {

@@ -12,6 +12,7 @@ npm run dev     # http://localhost:5173
 It proxies to the API on **5102** — the port the asset-register contract fixes.
 Set `BACKEND_URL` to point somewhere else. Start the backend first
 (`cd ../backend && docker compose up -d`), or the app renders its error state.
+[`../start.sh`](../start.sh) does both halves in one terminal instead.
 
 | | |
 |---|---|
@@ -52,18 +53,47 @@ this as `named_layer: { available, count, error }` — a list with no names
 because Overpass was unreachable must not look like a list with no critical
 facilities nearby.
 
+The ranked list acts on that field. When `available` is false it shows a
+"names unavailable" banner above the rows and falls back to the asset id, set
+in a mono face, for every row — including the ones whose register `name`
+happens to differ from their type, because a storage tank labelled
+"residential" is still the register's placeholder and not a name. Rows are
+told apart by id, distance from the ignition point, ETA and risk, since name,
+type, value and vulnerability are identical across thousands of them.
+
 ## Layout
 
 ```
 src/
 ├── App.tsx              ranked list | map | controls, detail, charts, briefing
 ├── api/                 client.ts (fetch + ApiError), hooks.ts, types.ts
-├── map/MapView.tsx      MapLibre: ICGC basemap, contours, assets by tier
+├── map/MapView.tsx      MapLibre: ICGC basemap, contours, assets by tier,
+│                        the other scenarios' ignition points
 ├── components/          RankedList, ControlPanel, AssetDetail, ChartsPanel,
-│                        BriefingPanel, Header
-├── lib/ranks.ts         tier colours and rank-change tracking
+│   │                    BriefingPanel, Header, MapLegend
+│   └── ui/              local primitives — Button, Badge, Card, Select,
+│                        Slider, Checkbox
+├── lib/ranks.ts         tier colours, rank-change tracking, name fallback
+├── lib/geo.ts           distance from the ignition point
 └── i18n.ts              en / es / ca
 ```
+
+`components/ui/` is shadcn/ui's shape without its dependencies: the same
+variant-prop call sites (`<Button variant="ghost">`, `<Badge variant="critical">`)
+over native elements and this project's Tailwind tokens. `cn()` is eight lines
+instead of `clsx` + `tailwind-merge`, so it joins class names but does not
+resolve conflicts — the note at the top of `ui/cn.ts` says what that costs and
+what swapping the real library in would take. The sliders and the two selects
+are native controls, which is where the keyboard behaviour comes from; adopting
+Radix would mean adding `@radix-ui/react-slider` and friends.
+
+Every scenario's ignition point is on the map, not just the one being viewed.
+The others are hollow amber rings, off-screen at the zoom `fitBounds` lands on
+and coming into view as you zoom out; clicking one switches scenario, exactly
+as the header picker does. They are a separate source from the active
+`ignition` so the two can be styled and hit-tested apart. The basemap is raster
+and the style sets no `glyphs`, so their labels are MapLibre popups on hover —
+a `text-field` symbol layer would render nothing.
 
 The time scrubber in `ControlPanel` restyles the contours against `t`; it does
 not refetch. Changing a scoring parameter does refetch — both `/score` and

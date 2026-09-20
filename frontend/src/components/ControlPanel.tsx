@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { ParamMeta, ScoreParams } from "../api/types";
+import { Button, Card, CardTitle, Checkbox, Slider, SliderField } from "./ui";
 
 const SLIDERS: { key: keyof ScoreParams; label: string; step: number }[] = [
   { key: "tau", label: "controls.tau", step: 5 },
@@ -38,6 +39,7 @@ export default function ControlPanel({
   const [draft, setDraft] = useState(params);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const horizonAuto = params.horizon == null;
+  const atEnd = t >= horizon;
 
   useEffect(() => setDraft(params), [params]);
 
@@ -61,88 +63,82 @@ export default function ControlPanel({
   }, [t, horizon, playing, onPlay]);
 
   return (
-    <section className="space-y-4 p-3">
+    <Card className="space-y-4">
       <div>
-        <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-text-muted">
-          {tr("panel.timeline")}
-        </h2>
+        <CardTitle className="mb-2 block">{tr("panel.timeline")}</CardTitle>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => (t >= horizon ? onT(0) : onPlay(!playing))}
-            className="w-8 rounded border border-border bg-raised py-1 text-sm hover:border-accent"
+          <Button
+            size="icon"
+            onClick={() => (atEnd ? onT(0) : onPlay(!playing))}
             aria-label="play/pause"
             data-testid="play-button"
           >
-            {t >= horizon ? "↺" : playing ? "❚❚" : "▶"}
-          </button>
-          <input
-            type="range"
+            {atEnd ? "↺" : playing ? "❚❚" : "▶"}
+          </Button>
+          <Slider
             min={0}
             max={Math.ceil(horizon)}
             step={1}
             value={t}
             onChange={(e) => onT(Number(e.target.value))}
-            className="flex-1 accent-accent"
+            aria-label={tr("panel.timeline")}
+            className="flex-1"
             data-testid="time-slider"
           />
-          <span className="tnum w-16 text-right text-xs text-text-secondary">
+          <span className="tnum w-16 shrink-0 text-right text-xs text-text-secondary">
             {Math.round(t)} / {Math.round(horizon)} min
           </span>
         </div>
       </div>
 
       <div>
-        <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-text-muted">
-          {tr("panel.controls")}
-        </h2>
-        <div className="space-y-2">
+        <CardTitle className="mb-2 block">{tr("panel.controls")}</CardTitle>
+        <div className="space-y-2.5">
           {SLIDERS.map(({ key, label, step }) => {
             const m = meta?.[key];
             return (
-              <label key={key} className="block">
-                <div className="flex justify-between text-[11px] text-text-secondary">
-                  <span>{tr(label)}</span>
-                  <span className="tnum">{(draft[key] as number).toFixed(step < 1 ? 1 : 0)}</span>
-                </div>
-                <input
-                  type="range"
-                  min={m?.min ?? 0}
-                  max={m?.max ?? 100}
-                  step={step}
-                  value={draft[key] as number}
-                  onChange={(e) => update(key, Number(e.target.value))}
-                  className="w-full accent-accent"
-                />
-              </label>
+              <SliderField
+                key={key}
+                id={`param-${key}`}
+                label={tr(label)}
+                display={(draft[key] as number).toFixed(step < 1 ? 1 : 0)}
+                min={m?.min ?? 0}
+                max={m?.max ?? 100}
+                step={step}
+                value={draft[key] as number}
+                onChange={(e) => update(key, Number(e.target.value))}
+              />
             );
           })}
-          <label className="block">
-            <div className="flex justify-between text-[11px] text-text-secondary">
-              <span>{tr("controls.horizon")}</span>
-              <span className="tnum">
+          <div>
+            <div className="mb-1 flex items-baseline justify-between gap-2 text-[11px]">
+              <label htmlFor="param-horizon" className="text-text-secondary">
+                {tr("controls.horizon")}
+              </label>
+              <span className="tnum text-text-primary">
                 {horizonAuto ? tr("controls.auto") : `${draft.horizon} min`}
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={horizonAuto}
+                aria-label={tr("controls.auto")}
                 onChange={(e) => update("horizon", e.target.checked ? null : Math.ceil(horizon))}
               />
-              <input
-                type="range"
+              <Slider
+                id="param-horizon"
                 min={meta?.horizon?.min ?? 0}
                 max={meta?.horizon?.max ?? 1440}
                 step={10}
                 disabled={horizonAuto}
                 value={draft.horizon ?? Math.ceil(horizon)}
                 onChange={(e) => update("horizon", Number(e.target.value))}
-                className="flex-1 accent-accent disabled:opacity-40"
+                className="flex-1"
               />
             </div>
-          </label>
+          </div>
         </div>
       </div>
-    </section>
+    </Card>
   );
 }

@@ -15,8 +15,7 @@ import {
 } from "recharts";
 
 import type { SensitivityResult, ScoredResult } from "../api/types";
-
-const ROBUSTNESS_COLOR = { robust: "#30D158", moderate: "#F59E0B", sensitive: "#EF4444" };
+import { Badge, Card, CardTitle } from "./ui";
 
 interface Props {
   result: ScoredResult | undefined;
@@ -32,11 +31,9 @@ export default function ChartsPanel({ result, sensitivity, t }: Props) {
   );
 
   return (
-    <section className="space-y-3 p-3">
+    <Card className="space-y-3">
       <div>
-        <h2 className="mb-1 text-xs font-semibold uppercase tracking-wider text-text-muted">
-          {tr("panel.charts")}
-        </h2>
+        <CardTitle className="mb-1 block">{tr("panel.charts")}</CardTitle>
         <div className="h-32">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={cumulative} margin={{ top: 4, right: 4, bottom: 0, left: -18 }}>
@@ -65,20 +62,12 @@ export default function ChartsPanel({ result, sensitivity, t }: Props) {
         </div>
       </div>
       <div>
-        <h2 className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-text-muted">
+        <CardTitle className="mb-1 flex items-center gap-2">
           {tr("panel.sensitivity")}
           {sensitivity && (
-            <span
-              className="rounded px-1.5 py-0.5 text-[10px] font-bold normal-case"
-              style={{
-                color: ROBUSTNESS_COLOR[sensitivity.robustness],
-                background: `${ROBUSTNESS_COLOR[sensitivity.robustness]}22`,
-              }}
-            >
-              {sensitivity.robustness}
-            </span>
+            <Badge variant={sensitivity.robustness}>{sensitivity.robustness}</Badge>
           )}
-        </h2>
+        </CardTitle>
         <div className="h-28">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={perturbs} margin={{ top: 4, right: 4, bottom: 0, left: -22 }}>
@@ -102,6 +91,6 @@ export default function ChartsPanel({ result, sensitivity, t }: Props) {
           </ResponsiveContainer>
         </div>
       </div>
-    </section>
+    </Card>
   );
 }

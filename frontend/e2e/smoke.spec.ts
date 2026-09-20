@@ -14,11 +14,18 @@ test.describe("smoke", () => {
     await expect(page.getByText("FireProtector")).toBeVisible();
     await expect(page.getByTestId("data-mode-badge")).toHaveText(body.data_mode);
 
-    // The first scenario in the seed file drives the whole screen.
+    // The first scenario in the seed file is what the picker opens on. The name
+    // lives inside a <select> now, so assert on the selected value rather than
+    // on visible text — a closed native select does not render its options.
     const scenarios = await (await request.get("/api/scenarios")).json();
     const first = scenarios.scenarios[0];
-    await expect(page.getByText(first.name)).toBeVisible();
+    const picker = page.getByTestId("scenario-select");
+    await expect(picker).toBeVisible();
+    await expect(picker).toHaveValue(first.scenario_id);
     await expect(page.getByText("Scenario")).toBeVisible();
+
+    // Every colour on the map is explained somewhere on screen.
+    await expect(page.getByTestId("map-legend")).toBeVisible();
 
     // Ranked list populates from /score. The first request for a scenario with
     // no recorded bundle runs a live simulation, so this waits a long time.

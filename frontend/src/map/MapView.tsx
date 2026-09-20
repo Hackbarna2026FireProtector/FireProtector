@@ -5,33 +5,41 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useRef, useState } from "react";
 
 import type { FeatureCollection, Scenario, ScoredResult, SpreadForecast, Tier } from "../api/types";
+import { firstPoint } from "../lib/geo";
 import { TIER_COLORS } from "../lib/ranks";
 import { basemapStyle } from "./basemap";
 
 interface Props {
   scenario: Scenario | undefined;
+  /** Every scenario, so the ones not being viewed can be shown and picked. */
+  scenarios: Scenario[];
   spread: SpreadForecast | undefined;
   scored: ScoredResult | undefined;
   t: number; // scrubber minutes
   selectedId: string | null;
   onSelect: (assetId: string | null) => void;
+  onScenario: (scenarioId: string) => void;
 }
 
 const EMPTY_FC: FeatureCollection = { type: "FeatureCollection", features: [] };
 
 export default function MapView({
   scenario,
+  scenarios,
   spread,
   scored,
   t,
   selectedId,
   onSelect,
+  onScenario,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MLMap | null>(null);
   const [ready, setReady] = useState(false);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  const onScenarioRef = useRef(onScenario);
+  onScenarioRef.current = onScenario;
 
   // Init once.
   useEffect(() => {
@@ -47,6 +55,7 @@ export default function MapView({
     map.on("load", () => {
       map.addSource("spread", { type: "geojson", data: EMPTY_FC });
       map.addSource("assets", { type: "geojson", data: EMPTY_FC });
+      map.addSource("other-ignitions", { type: "geojson", data: EMPTY_FC });
 
       map.addLayer({
         id: "contours-fill",
@@ -114,12 +123,69 @@ export default function MapView({
         },
       });
 
+      // The scenarios not currently being viewed. Drawn last so they sit above
+      // the contours, and in a hollow amber ring so they never read as the
+      // active ignition — the halo is what makes them findable once the map is
+      // zoomed out far enough to hold two fires at once.
+      map.addLayer({
+        id: "other-ignitions-halo",
+        type: "circle",
+        source: "other-ignitions",
+        paint: {
+          "circle-radius": 16,
+          "circle-color": "#F59E0B",
+          "circle-opacity": 0.12,
+        },
+      });
+      map.addLayer({
+        id: "other-ignitions",
+        type: "circle",
+        source: "other-ignitions",
+        paint: {
+          "circle-radius": 7,
+          "circle-color": "#F59E0B",
+          "circle-opacity": 0.25,
+          "circle-stroke-width": 2,
+          "circle-stroke-color": "#F59E0B",
+        },
+      });
+
       map.on("click", "assets", (e) => {
         const id = e.features?.[0]?.properties?.asset_id as string | undefined;
         onSelectRef.current(id ?? null);
       });
       map.on("mouseenter", "assets", () => (map.getCanvas().style.cursor = "pointer"));
       map.on("mouseleave", "assets", () => (map.getCanvas().style.cursor = ""));
+
+      // The basemap is raster and the style carries no `glyphs` URL, so a
+      // symbol layer would render nothing. An HTML popup names the fire
+      // instead; setText rather than setHTML keeps the name inert.
+      const hover = new maplibregl.Popup({
+        closeButton: false,
+        closeOnClick: false,
+        offset: 14,
+        className: "fp-popup",
+      });
+
+      map.on("click", "other-ignitions", (e) => {
+        const id = e.features?.[0]?.properties?.scenario_id as string | undefined;
+        if (id) {
+          hover.remove();
+          onScenarioRef.current(id);
+        }
+      });
+      map.on("mouseenter", "other-ignitions", (e) => {
+        map.getCanvas().style.cursor = "pointer";
+        const f = e.features?.[0];
+        const name = f?.properties?.name as string | undefined;
+        const at = firstPoint(f?.geometry && "coordinates" in f.geometry ? f.geometry.coordinates : null);
+        if (name && at) hover.setLngLat(at).setText(name).addTo(map);
+      });
+      map.on("mouseleave", "other-ignitions", () => {
+        map.getCanvas().style.cursor = "";
+        hover.remove();
+      });
+
       setReady(true);
     });
     mapRef.current = map;
@@ -151,6 +217,23 @@ export default function MapView({
     if (!ready || !map || !scored) return;
     (map.getSource("assets") as maplibregl.GeoJSONSource)?.setData(scored as never);
   }, [ready, scored]);
+
+  // The other scenarios' ignition points. Kept out of the active `ignition`
+  // source so the two can be styled and hit-tested separately.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    (map.getSource("other-ignitions") as maplibregl.GeoJSONSource)?.setData({
+      type: "FeatureCollection",
+      features: scenarios
+        .filter((s) => s.scenario_id !== scenario?.scenario_id)
+        .map((s) => ({
+          type: "Feature",
+          geometry: s.ignition_point,
+          properties: { scenario_id: s.scenario_id, name: s.name },
+        })),
+    } as never);
+  }, [ready, scenarios, scenario?.scenario_id]);
 
   // Ignition point.
   useEffect(() => {

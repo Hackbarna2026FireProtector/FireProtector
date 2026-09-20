@@ -28,3 +28,29 @@ export const fmtEta = (eta: number | null): string =>
 export const fmtPct = (x: number): string => `${Math.round(x * 100)}%`;
 
 export const fmtRisk = (x: number): string => (x > 0 ? x.toFixed(3) : "0");
+
+/**
+ * Whether a row carries a real name.
+ *
+ * Two things have to hold. The register labels every row "residential" whatever
+ * it actually is — a storage tank included — so the only rows that can carry a
+ * real name are the ones the OpenStreetMap layer matched; `namesAvailable` is
+ * that layer's own report, and when it is false nothing on screen is named.
+ * Within an available layer, a name that merely repeats the type is still the
+ * register's placeholder showing through.
+ */
+export function hasRealName(
+  p: Pick<ScoredProps, "name" | "asset_type">,
+  namesAvailable = true,
+): boolean {
+  if (!namesAvailable) return false;
+  return !!p.name && p.name.toLowerCase() !== p.asset_type.toLowerCase();
+}
+
+/** The name when there is one, the id when there is not. */
+export function displayName(
+  p: Pick<ScoredProps, "name" | "asset_type" | "asset_id">,
+  namesAvailable = true,
+): string {
+  return hasRealName(p, namesAvailable) ? p.name : p.asset_id;
+}
