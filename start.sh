@@ -223,9 +223,10 @@ else
         || warn "the API is not healthy yet; check: ${COMPOSE[*]} logs api"
 fi
 
-if ! docker exec fireprotector-api sh -c '[ -n "$DEEPFIRE_CLIENT_ID" ] && [ -n "$DEEPFIRE_CLIENT_SECRET" ]' 2>/dev/null; then
-    warn "no Deepfire credentials: new ignitions cannot be simulated and"
-    warn "GET /fire/arrival-grid answers 500. The recorded scenarios still work."
+if ! docker exec fireprotector-api sh -c '[ -f "${DATA_DIR:-data/fire_spread/catalonia}/dem.tif" ]' 2>/dev/null; then
+    warn "no fire-spread static tier: new ignitions cannot be simulated and"
+    warn "GET /fire/arrival-grid answers 503. The recorded scenarios still work."
+    warn "Build it once with ./backend/scripts/setup_fire_data.sh (~3 GB, 10-30 min)."
 fi
 
 # -------------------------------------------------------------- frontend ----
