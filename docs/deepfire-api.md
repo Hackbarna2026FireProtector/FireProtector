@@ -1,4 +1,7 @@
-# Deepfire API notes
+# Deepfire API notes (historical)
+
+> **Superseded.** The backend no longer calls Deepfire; `backend/fire_spread/` runs ELMFIRE itself
+> on open Catalan data (see `backend/fire_spread/README.md`). Kept as reference only.
 
 Working notes from exploring `docs.deepfire.co` + live testing against the real API.
 Auth/keys live in `notes.txt` (gitignore this if the repo is ever pushed).

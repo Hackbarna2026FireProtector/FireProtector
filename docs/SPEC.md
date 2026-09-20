@@ -1,5 +1,10 @@
 # Devin Build Spec: Wildfire Values-at-Risk Decision Layer + Command-Centre UI
 
+> **Note (2026-09-19):** the fire-spread forecast is no longer provided by Deepfire. It comes from the
+> self-hosted ELMFIRE service in `backend/fire_spread/` (`GET /fire/arrival-grid`, see its
+> `README.md` / `openapi.yaml`): minute-level arrival times plus per-cell burn probability and
+> P10/P90 arrival from a Monte Carlo ensemble. References to Deepfire below are historical.
+
 ## 0. Mission
 
 You are building the decision layer and user interface for a wildfire "values at risk" tool for Catalonia, for the HackBarna 2026 hackathon (Norrsken wildfire challenge, "Values at risk" track).

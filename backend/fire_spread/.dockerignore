@@ -1,6 +1,5 @@
+data/
 .venv/
 __pycache__/
 *.pyc
-.env
-backend/fire_spread/data/
 .pytest_cache/
