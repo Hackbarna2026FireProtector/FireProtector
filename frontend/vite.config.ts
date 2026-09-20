@@ -7,19 +7,28 @@ import { defineConfig } from "vite";
 // BACKEND_URL when running the API straight on the host on another port.
 const BACKEND = process.env.BACKEND_URL ?? "http://localhost:5102";
 
+// /api is the decision layer this UI talks to. The other three are the
+// contract routes at the root, proxied as well so one origin serves
+// everything while poking at the API from the browser.
+const proxy = {
+  "/api": { target: BACKEND, changeOrigin: true },
+  "/assets": { target: BACKEND, changeOrigin: true },
+  "/fire": { target: BACKEND, changeOrigin: true },
+  "/health": { target: BACKEND, changeOrigin: true },
+};
+
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    proxy: {
-      // /api is the decision layer this UI talks to. The other three are the
-      // contract routes at the root, proxied as well so one origin serves
-      // everything while poking at the API from the browser.
-      "/api": { target: BACKEND, changeOrigin: true },
-      "/assets": { target: BACKEND, changeOrigin: true },
-      "/fire": { target: BACKEND, changeOrigin: true },
-      "/health": { target: BACKEND, changeOrigin: true },
-    },
+    proxy,
+  },
+  // `server` covers the dev server only, so the production build served by
+  // `npm run preview` — which is what `../start.sh --prod` runs — needs the
+  // same proxy, on the same port, or every call to /api is a 404.
+  preview: {
+    port: 5173,
+    proxy,
   },
   test: {
     environment: "jsdom",
