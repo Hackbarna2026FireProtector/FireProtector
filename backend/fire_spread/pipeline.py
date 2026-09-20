@@ -69,7 +69,8 @@ class Pipeline:
                 self._provider = wx.FixtureProvider(s.weather_fixture)
             else:
                 self._provider = wx.OpenMeteoProvider(
-                    s.open_meteo_base_url, s.open_meteo_ensemble_base_url, s.open_meteo_ensemble_model
+                    s.open_meteo_base_url, s.open_meteo_ensemble_base_url, s.open_meteo_ensemble_model,
+                    api_key=s.open_meteo_api_key, cache_ttl_s=s.weather_cache_ttl_s,
                 )
         return self._provider
 

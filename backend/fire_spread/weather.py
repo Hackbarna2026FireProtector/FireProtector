@@ -14,9 +14,12 @@ dead fuel moisture (%); ``to_bands`` does the conversion.
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -395,6 +398,9 @@ class OpenMeteoProvider:
         archive: bool = False,
         historical: bool = False,
         retry_waits_s: tuple[float, ...] = (5.0, 15.0),
+        api_key: str | None = None,
+        cache_ttl_s: float = 0.0,
+        cache_dir: Path | str | None = None,
     ):
         """Hindcast modes (no ensemble; cases fall back to statistical wind perturbations):
         ``archive=True`` targets the ERA5(-Land) reanalysis endpoint (``/v1/archive`` on
@@ -403,21 +409,58 @@ class OpenMeteoProvider:
 
         ``retry_waits_s``: pauses before retrying a 429 (minutely rate limit) or 5xx answer,
         one retry per entry; ``Retry-After`` wins when the server sends it. The live API keeps
-        this short; batch hindcasts pass longer waits."""
-        self.base_url = base_url.rstrip("/")
-        self.ensemble_base_url = ensemble_base_url.rstrip("/")
+        this short; batch hindcasts pass longer waits.
+
+        ``api_key``: Open-Meteo commercial key - added as ``apikey`` to every request and the
+        hosts get the ``customer-`` prefix they require. ``cache_ttl_s``: identical requests
+        (same points, start, horizon, members) within the window reuse the parsed answer,
+        which keeps a demo that re-runs the same ignition from spending quota. ``cache_dir``:
+        raw responses stored on disk *without expiry* - only sensible for ``archive`` /
+        ``historical`` data, which never changes, so hindcast batches and evaluations replay
+        for free after the first run."""
+        self.base_url = customer_host(base_url, api_key)
+        self.ensemble_base_url = customer_host(ensemble_base_url, api_key)
         self.ensemble_model = ensemble_model
         self.timeout_s = timeout_s
         self._client = client
         self.archive = archive
         self.historical = historical
         self.retry_waits_s = tuple(retry_waits_s)
+        self.api_key = api_key
+        self.cache_ttl_s = cache_ttl_s
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self._cache: dict[tuple, tuple[float, WeatherResult]] = {}
 
     @staticmethod
     def _fmt(t: datetime) -> str:
         return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:00")
 
+    def _disk_path(self, url: str, params: dict) -> Path | None:
+        if self.cache_dir is None:
+            return None
+        # keyed on the canonical host and the query, so keyed and free-tier runs share entries
+        key = json.dumps([url.replace("://customer-", "://"), sorted(params.items())], sort_keys=True)
+        return self.cache_dir / (hashlib.sha256(key.encode()).hexdigest()[:24] + ".json")
+
     async def _get(self, client: httpx.AsyncClient, url: str, params: dict) -> list[dict]:
+        disk = self._disk_path(url, params)
+        if disk is not None and disk.exists():
+            try:
+                return json.loads(disk.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass  # unreadable entry: fetch again and overwrite
+        docs = await self._get_remote(client, url, params)
+        if disk is not None:
+            try:
+                disk.parent.mkdir(parents=True, exist_ok=True)
+                disk.write_text(json.dumps(docs), encoding="utf-8")
+            except OSError as e:
+                log.warning("cannot write weather cache %s: %s", disk, e)
+        return docs
+
+    async def _get_remote(self, client: httpx.AsyncClient, url: str, params: dict) -> list[dict]:
+        if self.api_key:
+            params = {**params, "apikey": self.api_key}
         for attempt in range(len(self.retry_waits_s) + 1):
             try:
                 r = await client.get(url, params=params, timeout=self.timeout_s)
@@ -443,6 +486,18 @@ class OpenMeteoProvider:
 
     async def fetch(self, points, start, hours, history_hours=0, members=1) -> WeatherResult:
         start = floor_hour(start)
+        key = (tuple((round(p[0], 5), round(p[1], 5)) for p in points), start, hours, history_hours, members)
+        if self.cache_ttl_s > 0:
+            hit = self._cache.get(key)
+            if hit and time.monotonic() - hit[0] < self.cache_ttl_s:
+                return copy.copy(hit[1])  # callers set .grid / .members on their copy
+        result = await self._fetch(points, start, hours, history_hours, members)
+        if self.cache_ttl_s > 0:
+            self._cache = {k: v for k, v in self._cache.items() if time.monotonic() - v[0] < self.cache_ttl_s}
+            self._cache[key] = (time.monotonic(), copy.copy(result))
+        return result
+
+    async def _fetch(self, points, start, hours, history_hours=0, members=1) -> WeatherResult:
         t0 = start - timedelta(hours=history_hours)
         n = history_hours + hours
         end = t0 + timedelta(hours=n - 1)
@@ -490,6 +545,16 @@ class OpenMeteoProvider:
             if own:
                 await client.aclose()
         return result
+
+
+def customer_host(url: str, api_key: str | None) -> str:
+    """Open-Meteo serves paying customers from ``customer-<host>``; add the prefix when a key
+    is given and the URL is one of theirs (a proxy or a test server is left alone)."""
+    url = url.rstrip("/")
+    if api_key and ".open-meteo.com" in url and "://customer-" not in url:
+        scheme, host = url.split("://", 1)
+        return f"{scheme}://customer-{host}"
+    return url
 
 
 def _stack_points(series: list[MemberSeries], n_points: int) -> MemberSeries:

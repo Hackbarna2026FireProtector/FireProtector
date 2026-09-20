@@ -530,6 +530,7 @@ Environment or `.env` (see `.env.example`). `.env` is gitignored.
 | `API_PORT` | `5102` | Host port in `docker-compose.yml`. **Fixed by the contract** |
 | `DEEPFIRE_CLIENT_ID` / `DEEPFIRE_CLIENT_SECRET` | — | Deepfire credentials. Not used by this API any more (the fire spread is self-hosted); still passed through by compose for other Deepfire users |
 | `PIPELINE_MODE` | `tuned` | Model-knob bundle served by default: `tuned` (Catalan adjustments) or `base` (stock ELMFIRE); `fire_spread/modes.py` |
+| `OPEN_METEO_API_KEY` | — | Open-Meteo commercial key (switches to the `customer-*` hosts). Free tier is 10 000 weighted calls/day **per IP**; a simulation costs ~50–100, so a demo box shares the quota with every evaluation run from the same address |
 | `ELMFIRE_NPROC` | `4` | MPI ranks (cores) per ELMFIRE run |
 | `MAX_CONCURRENT_RUNS` | `1` | Simulations in flight; beyond it `/fire/arrival-grid` answers 503 |
 | `KEEP_RUNS` | `failed` | ELMFIRE run directories to keep under `data/fire_spread/runs/`: `all`, `failed`, `none` |

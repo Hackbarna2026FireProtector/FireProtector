@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import httpx
@@ -242,3 +243,71 @@ async def test_open_meteo_archive_mode():
     assert route.called and not ens.called
     assert "models" not in dict(route.calls[0].request.url.params)
     assert r.source == "open-meteo:archive" and len(r.members) == 1
+
+
+def test_customer_host():
+    assert wx.customer_host("https://api.open-meteo.com", "k") == "https://customer-api.open-meteo.com"
+    assert wx.customer_host("https://ensemble-api.open-meteo.com/", "k") == "https://customer-ensemble-api.open-meteo.com"
+    assert wx.customer_host("https://customer-api.open-meteo.com", "k") == "https://customer-api.open-meteo.com"
+    assert wx.customer_host("https://api.open-meteo.com", None) == "https://api.open-meteo.com"
+    assert wx.customer_host("http://proxy.local:8080", "k") == "http://proxy.local:8080"
+
+
+@respx.mock
+async def test_open_meteo_api_key_routes_to_customer_hosts():
+    fc = respx.get("https://customer-api.open-meteo.com/v1/forecast").mock(return_value=httpx.Response(200, json=_forecast_doc()))
+    ens = respx.get("https://customer-ensemble-api.open-meteo.com/v1/ensemble").mock(return_value=httpx.Response(500))
+    r = await wx.OpenMeteoProvider(api_key="secret", retry_waits_s=()).fetch([(41.6, 1.8)], T0, 3)
+    assert fc.called and ens.called and len(r.members) == 1
+    assert dict(fc.calls[0].request.url.params)["apikey"] == "secret"
+    assert dict(ens.calls[0].request.url.params)["apikey"] == "secret"
+
+
+@respx.mock
+async def test_open_meteo_cache(monkeypatch):
+    fc = respx.get("https://api.open-meteo.com/v1/forecast").mock(return_value=httpx.Response(200, json=_forecast_doc()))
+    respx.get("https://ensemble-api.open-meteo.com/v1/ensemble").mock(return_value=httpx.Response(500))
+    clock = [1000.0]
+    monkeypatch.setattr(wx.time, "monotonic", lambda: clock[0])
+    p = wx.OpenMeteoProvider(retry_waits_s=(), cache_ttl_s=600)
+    a = await p.fetch([(41.6, 1.8)], T0, 3)
+    a.grid = "mutated by the caller"
+    b = await p.fetch([(41.6, 1.8)], T0, 3)  # same request -> cached, and a fresh copy
+    assert fc.call_count == 1 and b.grid is None and b.members[0] is a.members[0]
+    await p.fetch([(41.6, 1.8)], T0, 4)  # different horizon -> new request
+    await p.fetch([(41.6, 1.8)], T0, 3, members=4)  # different member count -> new request
+    assert fc.call_count == 3
+    clock[0] += 599
+    await p.fetch([(41.6, 1.8)], T0, 3)
+    assert fc.call_count == 3  # still within the TTL
+    clock[0] += 2
+    await p.fetch([(41.6, 1.8)], T0, 3)
+    assert fc.call_count == 4  # expired
+    # off by default
+    q = wx.OpenMeteoProvider(retry_waits_s=())
+    await q.fetch([(41.6, 1.8)], T0, 3); await q.fetch([(41.6, 1.8)], T0, 3)
+    assert fc.call_count == 6
+
+
+@respx.mock
+async def test_open_meteo_disk_cache_for_past_weather(tmp_path):
+    route = respx.get("https://historical-forecast-api.open-meteo.com/v1/forecast").mock(
+        return_value=httpx.Response(200, json=_forecast_doc()))
+    keyed = respx.get("https://customer-historical-forecast-api.open-meteo.com/v1/forecast").mock(
+        return_value=httpx.Response(200, json=_forecast_doc()))
+    p = wx.OpenMeteoProvider("https://historical-forecast-api.open-meteo.com", historical=True, retry_waits_s=(),
+                             cache_dir=tmp_path / "wx", api_key="k")
+    a = await p.fetch([(41.6, 1.8)], T0, 3)
+    files = list((tmp_path / "wx").glob("*.json"))
+    assert keyed.call_count == 1 and route.call_count == 0 and len(files) == 1
+    assert "apikey" not in files[0].read_text() and '"k"' not in files[0].name
+    # a new provider instance (another process, another day, no key) replays from disk
+    q = wx.OpenMeteoProvider("https://historical-forecast-api.open-meteo.com", historical=True, retry_waits_s=(), cache_dir=tmp_path / "wx")
+    b = await q.fetch([(41.6, 1.8)], T0, 3)
+    assert route.call_count == 0 and b.members[0].ws_ms.tolist() == a.members[0].ws_ms.tolist()
+    # a different request is a different file; a corrupt entry is refetched and overwritten
+    await q.fetch([(41.6, 1.8)], T0, 4)
+    assert route.call_count == 1 and len(list((tmp_path / "wx").glob("*.json"))) == 2
+    files[0].write_text("{not json")
+    await q.fetch([(41.6, 1.8)], T0, 3)
+    assert route.call_count == 2 and json.loads(files[0].read_text())

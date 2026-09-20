@@ -99,8 +99,12 @@ spread-rate multiplier; 1.4 tuned / 1.0 base), `DIURNAL_ADJUSTMENT` + `OVERNIGHT
 (`scott_burgan` | `mediterranean`, see below) — which pin that knob in both modes when set;
 `HINDCAST`, `USE_BARRIERS`, `CROWN_RATIO`, `SPOTTING_DEFAULT`, `PERIMETER_MAX_IGNITIONS` (100),
 `OPEN_METEO_BASE_URL`,
-`OPEN_METEO_ENSEMBLE_BASE_URL`, `WEATHER_FIXTURE` (JSON file instead of Open-Meteo). Open-Meteo
-429/5xx answers are retried (5 s, 15 s on the live route; batch scripts wait out the minutely
+`OPEN_METEO_ENSEMBLE_BASE_URL`, `OPEN_METEO_API_KEY` (commercial key → `customer-*` hosts; the
+free tier is 10 000 weighted calls/day per IP and one simulation costs ~50–100),
+`WEATHER_CACHE_TTL_S` (identical live requests within 10 min reuse the answer), `WEATHER_CACHE_DIR`
+(past weather for hindcasts/evaluation is kept on disk for good under `data/fire_spread/weather_cache/`,
+so reruns cost no quota), `WEATHER_FIXTURE` (JSON
+file instead of Open-Meteo). Open-Meteo 429/5xx answers are retried (5 s, 15 s on the live route; batch scripts wait out the minutely
 limit with 15/65/65 s). ELMFIRE needs a large `/dev/shm` (`shm_size: 2gb` in compose; `--shm-size=2g` with plain `docker run`).
 
 All sources download automatically (Copernicus DEM from AWS, ZAFM fuel from Zenodo, ICGC canopy
@@ -267,7 +271,9 @@ fires in `scripts/fire_spread/eval_fires.json`: Catalan wildfires that burned fr
 enough that a no-suppression simulation is comparable with the final DARP perimeter. Each entry
 gives the ignition time and free-burning horizon (approximate, from public briefings — edit and
 rerun); the ignition point is the upwind-most burnable perimeter vertex unless `ignition` is
-given. Both modes get the same fires, points, weather and seeds.
+given. Both modes get the same fires, points, weather and seeds. Past weather is fetched once
+and cached on disk (`data/fire_spread/weather_cache/`), so only the first run of a fire set
+spends Open-Meteo quota (the free tier is 10 000 weighted calls/day per IP; one fire is ~50-100).
 
 ```sh
 cd backend

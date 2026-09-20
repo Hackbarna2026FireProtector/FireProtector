@@ -174,11 +174,15 @@ def build_settings(mode: str | None, *, fuels: str | None = None, adj: float | N
 def weather_provider(kind: str) -> wx.OpenMeteoProvider:
     """``historical`` = past runs of the high-resolution forecast models (what the live API
     would have seen), ``archive`` = ERA5 reanalysis."""
-    # Batches hit Open-Meteo's minutely limit: wait it out rather than skip the fire.
+    # Batches hit Open-Meteo's minutely limit: wait it out rather than skip the fire. A
+    # commercial key (OPEN_METEO_API_KEY) lifts the daily limit a batch otherwise exhausts.
+    # Past weather never changes, so responses are cached on disk for good (WEATHER_CACHE_DIR).
     waits = (15.0, 65.0, 65.0)
+    s = Settings()
+    kw = dict(retry_waits_s=waits, api_key=s.open_meteo_api_key, cache_dir=s.weather_cache_dir)
     if kind == "archive":
-        return wx.OpenMeteoProvider("https://archive-api.open-meteo.com", archive=True, retry_waits_s=waits)
-    return wx.OpenMeteoProvider("https://historical-forecast-api.open-meteo.com", historical=True, retry_waits_s=waits)
+        return wx.OpenMeteoProvider("https://archive-api.open-meteo.com", archive=True, **kw)
+    return wx.OpenMeteoProvider("https://historical-forecast-api.open-meteo.com", historical=True, **kw)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     elmfire_timeout_s: float = 15 * 60
     open_meteo_base_url: str = "https://api.open-meteo.com"
     open_meteo_ensemble_base_url: str = "https://ensemble-api.open-meteo.com"
+    # Commercial key (open-meteo.com/en/pricing): sent as ?apikey= and the hosts switch to the
+    # customer-*.open-meteo.com endpoints. Without it the free tier applies: 10 000 weighted
+    # calls per day per IP (one simulation is ~50-100; a hindcast batch exhausts it).
+    open_meteo_api_key: str | None = None
+    weather_cache_ttl_s: float = 600.0  # identical weather requests within this window reuse the answer (0 = off)
+    # Past weather (historical-forecast / ERA5 endpoints used by hindcasts and the evaluation)
+    # never changes: raw responses are kept here for good, so reruns cost no quota.
+    weather_cache_dir: Path | None = Path("data/fire_spread/weather_cache")
     # NWP ensemble driving the cases. icon_eu_eps: 40 members, 13 km, hourly, but no humidity
     # (members reuse the deterministic RH); ecmwf_ifs025: 50 members, 25 km, all variables.
     open_meteo_ensemble_model: str = "icon_eu_eps"
