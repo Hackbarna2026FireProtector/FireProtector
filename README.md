@@ -97,16 +97,33 @@ placeholders](backend/README.md#replacing-the-placeholders).
 
 ## Getting it running
 
-Needs Docker, plus Python 3.11+ on the host for the loader.
+Needs **Docker**, **Python 3.11+** on the host for the loader, and **Node 20+**
+for the UI.
+
+From a fresh clone, in two terminals:
 
 ```bash
+# 1. backend — Postgres, the schema, both datasets, then the API on :5102
+cp backend/.env.example backend/.env     # optional; see below
 ./backend/scripts/setup_db.sh
+
+# 2. frontend — the UI on :5173, proxying to :5102
+cd frontend && npm install && npm run dev
 ```
 
-One command: starts Postgres, applies the schema, loads both datasets
-(~11 minutes for the assets, ~10 seconds for the forests), then builds and
-starts the API. It is safe to re-run — already-loaded municipalities are
-skipped, so a second run takes seconds.
+Then open **http://localhost:5173**.
+
+`backend/.env` is optional. Without `DEEPFIRE_CLIENT_ID`/`DEEPFIRE_CLIENT_SECRET`
+the app still runs: it serves the scenario bundles recorded under
+`backend/data/bundles/`, which are committed. With them, it can simulate new
+ignitions. `setup_db.sh` says so on its way past.
+
+### The backend, in more detail
+
+`setup_db.sh` is one command: it starts Postgres, applies the schema, loads
+both datasets (~11 minutes for the assets, ~10 seconds for the forests), then
+builds and starts the API. It is safe to re-run — already-loaded municipalities
+are skipped, so a second run takes seconds.
 
 When it finishes:
 
@@ -123,20 +140,39 @@ looks for the API there.
 
 Already set up? `cd backend && docker compose up -d`.
 
-### The UI
+### The UI, in more detail
 
-```bash
-cd frontend && npm install && npm run dev
-```
+`npm run dev` serves on **5173** and proxies `/api` to the backend on **5102**.
+Set `BACKEND_URL` to point somewhere else — the API running straight on the
+host on another port, say.
 
-http://localhost:5173, proxying to the API on 5102. Set `BACKEND_URL` to point
-somewhere else.
+| | |
+|---|---|
+| `npm run dev` | Vite dev server |
+| `npm run build` | typecheck + production build |
+| `npm test` | vitest |
+| `npm run e2e` | Playwright smoke test (needs both halves up) |
+| `npm run lint` | eslint |
 
 The first request for a scenario with no recorded bundle runs a live Deepfire
 simulation, which takes **two to four minutes** — the 24-hour ensemble is not
 quick. After that it is instant, and the result is written to
 `backend/data/bundles/`. Those recordings are committed, so **the UI works with
 no Deepfire credentials at all**; delete one to force a fresh simulation.
+
+### Running the tests
+
+The backend suite needs a virtualenv of its own — `setup_db.sh` only builds the
+loader's, under `backend/scripts/.venv`:
+
+```bash
+cd backend
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pytest -q                    # 181 tests, no database, no network
+
+cd ../frontend && npm test -- --run    # 8 tests
+```
 
 ## Repo map
 

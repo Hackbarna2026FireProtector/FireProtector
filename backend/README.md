@@ -338,7 +338,7 @@ Nothing here needs a database except the last two.
 
 ```bash
 cd backend
-.venv/bin/pytest -q                       # 94 tests, ~0.5s
+.venv/bin/pytest -q                       # 181 tests, ~2s
 ```
 
 ```bash
