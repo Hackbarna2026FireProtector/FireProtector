@@ -7,7 +7,6 @@ pydantic-settings==2.15.0
 # serialisation. shapely is pinned to the same version scripts/requirements.txt uses.
 httpx==0.28.1
 shapely==2.1.2
-lxml==6.1.3
 rasterio==1.5.1
 orjson==3.12.0
 python-dotenv==1.2.3
