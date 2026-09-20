@@ -1,8 +1,11 @@
 """Application settings, loaded from the environment (and a local .env file)."""
 
+import json
 from functools import lru_cache
+from typing import Annotated, Any
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -50,13 +53,38 @@ class Settings(BaseSettings):
     # Overpass mirrors for the named critical facilities, tried in order.
     # Empty means the provider's own list; set OVERPASS_URLS as a JSON array to
     # pin a mirror when the default one is unreachable.
-    overpass_urls: list[str] = []
+    overpass_urls: Annotated[list[str], NoDecode] = []
 
     # Nebius Token Factory, for briefings. With no key the deterministic
     # template path is used instead, which is always valid by construction.
     nebius_api_key: str = ""
     nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
     nebius_model: str = "meta-llama/Llama-3.3-70B-Instruct"
+
+    # NoDecode above, and this validator, exist because a list field is
+    # otherwise JSON-decoded inside the settings source, before any validation
+    # runs. A variable that is set but blank — `OVERPASS_URLS=` in .env, or
+    # Compose expanding `${OVERPASS_URLS:-}` for a variable unset on the host
+    # — then reaches json.loads as "" and raises SettingsError, which happens
+    # at import time and stops uvicorn from serving anything at all. Empty is
+    # already this field's default, so read a blank value as that.
+    #
+    # Deliberately not applied to cors_origins: its default is ["*"], so a
+    # blank value there is genuinely ambiguous, and is better rejected than
+    # quietly turned into "no browser origin may call this API".
+    @field_validator("overpass_urls", mode="before")
+    @classmethod
+    def _parse_mirror_list(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        v = v.strip()
+        if not v:
+            return []
+        if v.startswith("["):
+            return json.loads(v)
+        # A single bare URL, or a comma-separated few, rather than the JSON
+        # array the docs ask for. Unambiguous, so honour it.
+        return [part.strip() for part in v.split(",") if part.strip()]
 
 
 @lru_cache
