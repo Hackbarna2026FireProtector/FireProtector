@@ -10,8 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    data_dir: Path = Path("data/catalonia")
-    runs_dir: Path = Path("data/runs")
+    data_dir: Path = Path("data/fire_spread/catalonia")
+    runs_dir: Path = Path("data/fire_spread/runs")
     elmfire_nproc: int = 4
     elmfire_timeout_s: float = 15 * 60
     open_meteo_base_url: str = "https://api.open-meteo.com"

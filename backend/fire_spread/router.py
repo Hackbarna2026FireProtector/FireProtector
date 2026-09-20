@@ -48,7 +48,7 @@ async def data_info() -> dict:
     s = get_settings()
     p = s.data_dir / "manifest.json"
     if not p.exists():
-        raise HTTPException(status_code=404, detail="static data not prepared (run scripts/prepare_static_data.py)")
+        raise HTTPException(status_code=404, detail="static data not prepared (run scripts/setup_fire_data.sh)")
     import json
 
     return json.loads(p.read_text())
@@ -67,6 +67,8 @@ async def arrival_grid(
 ) -> ORJSONResponse:
     """Run an ELMFIRE ensemble from a point ignition and return the arrival grid."""
     s = get_settings()
+    if not (s.data_dir / "dem.tif").exists():
+        raise HTTPException(status_code=503, detail="static data not prepared (run scripts/setup_fire_data.sh)")
     sem = get_semaphore()
     try:
         await asyncio.wait_for(sem.acquire(), timeout=s.acquire_timeout_s)

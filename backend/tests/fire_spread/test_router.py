@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import json
 from pathlib import Path
 
@@ -8,13 +9,14 @@ import yaml
 from fastapi import FastAPI
 from jsonschema import Draft202012Validator
 
-from fire_spread import router as r
+# The package re-exports the APIRouter under the same name, so import the module explicitly.
+r = importlib.import_module("fire_spread.router")
 from fire_spread.models import (
     ArrivalGrid, ElmfireTimeout, OutsideCoverage, WeatherProviderError, WeatherSummary,
 )
 from fire_spread.settings import Settings
 
-OPENAPI = Path(__file__).resolve().parents[1] / "openapi.yaml"
+OPENAPI = Path(__file__).resolve().parents[2] / "fire_spread" / "openapi.yaml"
 
 
 def _grid(**kw) -> ArrivalGrid:
@@ -44,9 +46,12 @@ class FakePipeline:
 
 
 @pytest.fixture
-def app(monkeypatch):
+def app(monkeypatch, tmp_path):
     def make(outcome, delay=0.0, **settings):
         fake = FakePipeline(outcome, delay)
+        # The route refuses to run without the static tier; a stub dem.tif marks it present.
+        settings.setdefault("data_dir", tmp_path)
+        (settings["data_dir"] / "dem.tif").touch()
         s = Settings(acquire_timeout_s=0.05, **settings)
         monkeypatch.setattr(r, "get_pipeline", lambda: fake)
         monkeypatch.setattr(r, "get_settings", lambda: s)
@@ -119,5 +124,16 @@ async def test_health_and_data_info(app, tmp_path):
     a, _ = app(_grid(), data_dir=tmp_path)
     async with _client(a) as c:
         h = (await c.get("/fire/health")).json()
-        assert h["status"] == "ok" and h["dataPresent"] is False
+        assert h["status"] == "ok" and h["dataPresent"] is True
         assert (await c.get("/fire/data-info")).json() == {"grid": {"epsg": 25831}}
+
+
+async def test_no_static_data_is_503(app, tmp_path):
+    a, fake = app(_grid(), data_dir=tmp_path)
+    (tmp_path / "dem.tif").unlink()
+    async with _client(a) as c:
+        res = await c.get("/fire/arrival-grid", params={"lat": 41.59, "lon": 1.83})
+        assert res.status_code == 503 and "setup_fire_data" in res.json()["detail"]
+        assert (await c.get("/fire/health")).json()["dataPresent"] is False
+        assert (await c.get("/fire/data-info")).status_code == 404
+    assert fake.calls == []

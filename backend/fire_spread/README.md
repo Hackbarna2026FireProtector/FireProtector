@@ -10,12 +10,16 @@ GET /fire/arrival-grid?lat=41.59&lon=1.83[&durationHours=24][&ensembleMembers=16
 
 One request = one simulation, synchronous (10–60 s). Full contract in [`openapi.yaml`](openapi.yaml).
 
+This package is mounted at `/fire` by the FireProtector API (`backend/app/main.py`); it never
+touches the database and reads its own settings (`fire_spread/settings.py`) from the environment
+/ `backend/.env`, so it stays mountable on its own. Everything below is run from `backend/`.
+
 ## How it works
 
 Two data tiers:
 
-* **Static (built once)** – `scripts/prepare_static_data.py` produces Catalonia-wide
-  Int16 COGs in `data/catalonia/` (EPSG:25831, 50 m by default, `--res 30` for ELMFIRE's usual
+* **Static (built once)** – `scripts/setup_fire_data.sh` (→ `scripts/fire_spread/prepare_static_data.py`)
+  produces Catalonia-wide Int16 COGs in `data/fire_spread/catalonia/` (EPSG:25831, 50 m by default, `--res 30` for ELMFIRE's usual
   30 m; the pipeline follows the tier's resolution): `dem, slp, asp` (Copernicus GLO-30),
   `fbfm40` (ZAFM-DW 2026 Scott & Burgan fuel map), `cc, ch, cbh, cbd` (ICGC/CREAF canopy),
   `burnyear.tif` (DARP fire perimeters 2012–2024), `barrier.tif` (OSM roads/waterways as
@@ -48,19 +52,20 @@ are perturbed with the ensemble's σ (or defaults) instead.
 ## Run
 
 ```sh
-cd backend/fire_spread
-docker compose build                 # builds ELMFIRE from a pinned main commit (+1 upstream bug patch, see Dockerfile)
-docker compose run --rm fire-spread python scripts/prepare_static_data.py   # once, ~1 GB download
-docker compose up                    # http://localhost:8000/fire/arrival-grid?lat=41.59&lon=1.83
+cd backend
+scripts/setup_db.sh                  # Postgres + API image (builds ELMFIRE from a pinned main commit, +2 upstream patches; see Dockerfile)
+scripts/setup_fire_data.sh           # once: downloads ~2 GB of sources, writes the static tier (10-30 min)
+docker compose up -d api             # http://localhost:5102/fire/arrival-grid?lat=41.59&lon=1.83
 ```
 
-Dev (source mounted, `--reload`, all runs kept):
+`docker compose build api` is enough if you only want the image. Until the tier exists
+`GET /health` reports `"fire_spread": "no data"` and `/fire/arrival-grid` answers 503; with it,
+`"ready"`. The compose service mounts `app/`, `fire_spread/` and `scripts/fire_spread/` with
+`--reload` (only those directories are watched, so run directories do not restart the server)
+and `data/fire_spread/` read-write, and gives ELMFIRE the 2 GB `/dev/shm` it needs. On a Linux
+host `data/fire_spread/` must be writable by uid 10001 (the container's `api` user).
 
-```sh
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up
-```
-
-Environment (see `../../.env.example`, `fire_spread/settings.py` for all): `ELMFIRE_NPROC` (MPI
+Environment (see `../.env.example`, `fire_spread/settings.py` for all): `ELMFIRE_NPROC` (MPI
 ranks, one per case, default 4), `DATA_DIR`, `RUNS_DIR`, `KEEP_RUNS=all|failed|none`,
 `MAX_CONCURRENT_RUNS`, `DOMAIN_SIZE_M`, `CELL_SIZE_M` (default: the tier's), `IGNITION_FRAC`
 (0.5 = centred), `WEATHER_GRID_N` (4 → 10 km weather points on a 40 km domain; 1 = uniform),
@@ -77,21 +82,21 @@ needs a large `/dev/shm` (`shm_size: 2gb` in compose; `--shm-size=2g` with plain
 
 All sources download automatically (Copernicus DEM from AWS, ZAFM fuel from Zenodo, ICGC canopy
 from `datacloud.icgc.cat`, ZHR from `interior.gencat.cat`, fire perimeters from
-`agricultura.gencat.cat`, OSM from Geofabrik), ~2 GB into `data/raw/`.
+`agricultura.gencat.cat`, OSM from Geofabrik), ~2 GB into `data/fire_spread/raw/`.
 
 ## Debugging
 
-Every run is a directory `data/runs/<run_id>/` with `request.json`, `inputs/*.tif`,
+Every run is a directory `data/fire_spread/runs/<run_id>/` with `request.json`, `inputs/*.tif`,
 `inputs/ignitions.csv`, `weather/*.tif`, `elmfire.data`, `elmfire.out`,
 `outputs/time_of_arrival_*.tif`, `timings.json`.
-Open anything in QGIS; re-run by hand with `cd data/runs/<id> && elmfire elmfire.data`.
+Open anything in QGIS; re-run by hand with `cd data/fire_spread/runs/<id> && elmfire elmfire.data`.
 `?debug=1` returns the run id/dir, per-step timings and the tail of ELMFIRE's stdout.
 
-CLI (no HTTP):
+CLI (no HTTP; prefix with `docker compose run --rm api` to use the container's ELMFIRE):
 
 ```sh
 python -m fire_spread.cli --lat 41.59 --lon 1.83 --members 4 --out grid.json
-python -m fire_spread.cli --lat 41.59 --lon 1.83 --weather-fixture tests/fixtures/weather_west_30mph.json
+python -m fire_spread.cli --lat 41.59 --lon 1.83 --weather-fixture tests/fire_spread/fixtures/weather_west_30mph.json
 python -m fire_spread.cli --lat 41.59 --lon 1.83 --synthetic --constant-wind 9 270   # no static data needed
 python -m fire_spread.cli --lat 41.59 --lon 1.83 --elmfire-data-only                  # stop after writing the run dir
 python -m fire_spread.cli --lat 41.59 --lon 1.83 --spotting --no-ensemble --fuels mediterranean
@@ -103,11 +108,14 @@ part of the run): the ELMFIRE `SEED` is derived from lat/lon/startTime (or `?see
 ## Tests
 
 ```sh
-uv sync && uv run pytest                      # unit tests, run anywhere (no ELMFIRE, no data)
-# real ELMFIRE on a synthetic landscape (dev deps synced into a named volume on first run):
-docker run --rm --shm-size=2g -v "$PWD:/app" -v fs-venv:/opt/venv2 --user root fireprotector/fire-spread \
-    bash scripts/run_in_container.sh pytest -m elmfire
+cd backend
+.venv/bin/pytest tests/fire_spread     # unit tests, run anywhere (no ELMFIRE, no data)
+scripts/test_fire_spread.sh            # real ELMFIRE on a synthetic landscape, inside the api container
 ```
+
+The image carries neither `tests/` nor the dev dependencies; the script mounts and installs them
+on the fly. `pytest.ini` at `backend/` registers the `elmfire` marker; those tests skip when the
+binary is absent.
 
 ## Response
 
@@ -134,8 +142,10 @@ Cell `(row, col)` covers `[originLon + col·cellDegLon, +cellDegLon) × [originL
 cell within the horizon (or outside data coverage). The ignition cell holds `0`.
 `arrivalHours = ceil(arrivalMinutes / 60)` is kept for clients of the previous Deepfire-based API.
 
-Errors: 422 ignition outside Catalonia coverage or on a non-burnable cell · 502 weather provider
-failure · 503 all simulation slots busy · 504 ELMFIRE timeout.
+Errors: 422 ignition outside Catalonia coverage or on a non-burnable cell (**400** through the
+FireProtector API, which also wraps every error as `{"error": {"code", "message"}}`) · 502
+weather provider failure · 503 all simulation slots busy, or static tier not built · 504
+ELMFIRE timeout.
 
 ## Fuel model sets
 
@@ -217,7 +227,7 @@ user guide at elmfire.io.
 
 ## Calibration: the hindcast loop
 
-`scripts/hindcast.py` replays DARP fire perimeters with the pipeline and scores them — the only
+`scripts/fire_spread/hindcast.py` replays DARP fire perimeters with the pipeline and scores them — the only
 way to decide any of the knobs above. Per fire: perimeter + date (DARP has no ignition point,
 time or duration) → ERA5 weather via the Open-Meteo archive API (`OpenMeteoProvider(archive=True)`,
 statistical wind perturbations since there is no reanalysis ensemble) → ignition at the most
@@ -226,12 +236,13 @@ upwind burnable point of the perimeter at 12:00 UTC → 24 h run (`--hours`) →
 pipeline ignore burn scars of the ignition year (the simulated fire is in `burnyear.tif`).
 
 ```sh
-docker run --rm --shm-size=2g -v "$PWD:/app" -v fs-venv:/opt/venv2 -e DATA_DIR=/app/data/catalonia     fireprotector/fire-spread bash scripts/run_in_container.sh scripts.hindcast --min-ha 100 --limit 10
+cd backend
+docker compose run --rm api python -m scripts.fire_spread.hindcast --min-ha 100 --limit 10
 # knobs: --fuels mediterranean  --adj 0.8  --hours 36  --spotting  --no-barriers  --members 8
-docker run -d --name hindcast ... bash scripts/hindcast_batch.sh     # both fuel sets, detached
+docker compose run -d --name hindcast api bash scripts/fire_spread/hindcast_batch.sh "--fuels scott_burgan" "--fuels mediterranean"
 ```
 
-Results land in `data/hindcast/<tag>.csv`; the summary line is formatted for the log in
+Results land in `data/fire_spread/hindcast/<tag>.csv`; the summary line is formatted for the log in
 [`docs/elmfire-pipe-assessment.md`](../../docs/elmfire-pipe-assessment.md), which also holds the
 input/knob audit. Knobs in the order the docs treat them as calibration coefficients: `ADJ_FACTOR`
 (global), then pyrome tables (`USE_PYROMES` + `ADJUSTMENT_FACTORS_FILENAME`: multiplier per

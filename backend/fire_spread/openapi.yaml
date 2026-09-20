@@ -6,6 +6,11 @@ info:
     runs a Monte Carlo ensemble of ELMFIRE simulations on open Catalan data (50 m
     cells, 40x40 km domain placed downwind of the ignition) and returns a lat/lon grid with minute-level arrival
     times and per-cell uncertainty (burn probability, P10/P90 arrival).
+
+    Mounted at /fire inside the FireProtector API (backend/app), whose global
+    error handlers apply: every error body is {"error": {"code", "message"}}
+    rather than {"detail"} and 422 is reported as 400 (see backend/README.md,
+    "Errors"). The status codes below are what the router itself raises.
   version: "2.0.0"
 
 servers:
@@ -84,6 +89,7 @@ paths:
           description: >
             Validation error, or the ignition is outside the static-data coverage
             (Catalonia) or on a non-burnable cell (urban, water, agriculture, barren).
+            Reported as 400 by the FireProtector API.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HTTPError" }
@@ -98,7 +104,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/HTTPError" }
         "503":
-          description: All simulation slots busy; retry later.
+          description: >
+            All simulation slots busy (retry later), or the static tier has not been
+            built yet (scripts/setup_fire_data.sh).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HTTPError" }
@@ -133,7 +141,7 @@ paths:
       operationId: dataInfo
       responses:
         "200":
-          description: Contents of data/catalonia/manifest.json
+          description: Contents of data/fire_spread/catalonia/manifest.json
           content:
             application/json:
               schema: { type: object }
@@ -287,4 +295,6 @@ components:
       required: [detail]
       properties:
         detail:
-          description: Human-readable error message (or FastAPI validation detail list).
+          description: >
+            Human-readable error message (or FastAPI validation detail list). Inside the
+            FireProtector API the same text arrives as error.message.

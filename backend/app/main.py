@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import AsyncConnectionPool
 
 from fire_spread import router as fire_spread_router
+from fire_spread.elmfire_runner import elmfire_available
+from fire_spread.settings import get_settings as get_fire_settings
 
 from .config import Settings, get_settings
 from .db import create_pool, get_pool
@@ -40,8 +42,9 @@ def create_app() -> FastAPI:
         description=(
             "Asset register for the wildfire values-at-risk tool. GET /assets "
             "implements the asset-register contract; the other two routes are "
-            "internal. GET /fire/arrival-grid runs a Deepfire fire-spread "
-            "simulation and returns the hour the fire reaches each grid cell."
+            "internal. GET /fire/arrival-grid runs a self-hosted ELMFIRE "
+            "fire-spread ensemble and returns the hour the fire reaches each "
+            "grid cell plus its burn probability."
         ),
         version="1.0.0",
         lifespan=lifespan,
@@ -57,7 +60,8 @@ def create_app() -> FastAPI:
     app.include_router(building_specs.router)
     app.include_router(add_building.router)
     # Mounted from the sibling `fire_spread` package rather than app/routers:
-    # it talks to Deepfire, not to Postgres, and stays independently mountable.
+    # it drives ELMFIRE and Open-Meteo, not Postgres, and stays independently
+    # mountable (it reads its own settings from the environment).
     app.include_router(fire_spread_router, prefix="/fire")
     install_handlers(app)
 
@@ -66,13 +70,24 @@ def create_app() -> FastAPI:
         pool: AsyncConnectionPool = Depends(get_pool),
         settings: Settings = Depends(get_settings),
     ) -> HealthResponse:
+        # The fire-spread half needs the ELMFIRE binary (baked into the image)
+        # and the static tier (built by scripts/setup_fire_data.sh). Neither
+        # degrades the status: the asset routes do not depend on them.
+        if not elmfire_available():
+            fire_spread = "no elmfire"
+        elif not (get_fire_settings().data_dir / "dem.tif").exists():
+            fire_spread = "no data"
+        else:
+            fire_spread = "ready"
         try:
             async with pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute("SELECT 1")
                 await cur.fetchone()
         except Exception as exc:  # surfaced as a status, not a 500
-            return HealthResponse(status="degraded", database="unreachable", detail=str(exc))
-        return HealthResponse(status="ok", database="connected")
+            return HealthResponse(
+                status="degraded", database="unreachable", fire_spread=fire_spread, detail=str(exc)
+            )
+        return HealthResponse(status="ok", database="connected", fire_spread=fire_spread)
 
     return app
 

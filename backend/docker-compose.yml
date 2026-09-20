@@ -54,6 +54,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # ELMFIRE shares rasters between MPI ranks via /dev/shm; the 64 MB default
+    # is far too small for a 40 km domain.
+    shm_size: "2gb"
     environment:
       # Inside the compose network the database is reachable as `db`. This
       # overrides anything in .env, which targets localhost for running the
@@ -68,6 +71,15 @@ services:
       # route answers 500 and the rest of the API is unaffected.
       DEEPFIRE_CLIENT_ID: ${DEEPFIRE_CLIENT_ID:-}
       DEEPFIRE_CLIENT_SECRET: ${DEEPFIRE_CLIENT_SECRET:-}
+      # ELMFIRE fire-spread pipeline behind /fire/arrival-grid. The static tier
+      # and run directories live on the data/fire_spread bind mount below;
+      # scripts/setup_fire_data.sh builds the tier. See fire_spread/README.md
+      # for the remaining knobs (all read from the environment / backend/.env).
+      ELMFIRE_NPROC: ${ELMFIRE_NPROC:-4}
+      DATA_DIR: /srv/data/fire_spread/catalonia
+      RUNS_DIR: /srv/data/fire_spread/runs
+      KEEP_RUNS: ${KEEP_RUNS:-failed}
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-1}
     ports:
       # 5102 is the port the asset-register contract names, so the frontend and
       # the decision layer find the API where they expect it.
@@ -77,8 +89,15 @@ services:
       # editing app/ or fire_spread/ does not need a rebuild.
       - ./app:/srv/app:ro
       - ./fire_spread:/srv/fire_spread:ro
+      - ./scripts/fire_spread:/srv/scripts/fire_spread:ro
+      # Static tier, source downloads, ELMFIRE run directories and hindcast
+      # results (read-write; on Linux hosts make it writable by uid 10001).
+      - ./data/fire_spread:/srv/data/fire_spread
+    # Reload only watches the code mounts: ELMFIRE writes run directories under
+    # /srv/data, and watching those would restart the server mid-simulation.
     command:
-      ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
+       "--reload", "--reload-dir", "app", "--reload-dir", "fire_spread"]
 
 volumes:
   pgdata:

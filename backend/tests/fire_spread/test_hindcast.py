@@ -2,7 +2,7 @@ import numpy as np
 from shapely.geometry import Polygon, box
 
 from fire_spread.models import ArrivalGrid, WeatherSummary
-from scripts import hindcast as hc
+from scripts.fire_spread import hindcast as hc
 
 
 def _grid(prob):

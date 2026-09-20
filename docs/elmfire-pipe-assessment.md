@@ -85,7 +85,7 @@ cells are walls; pyrome tables empty.
 
 | Item | State | Since |
 |---|---|---|
-| Hindcast loop (`scripts/hindcast.py`) | built; DARP perimeters, ERA5 archive weather, Jaccard/Sørensen/bias | 2026-09-20 |
+| Hindcast loop (`scripts/fire_spread/hindcast.py`) | built; DARP perimeters, ERA5 archive weather, Jaccard/Sørensen/bias | 2026-09-20 |
 | Global `ADJ` calibration | blocked: bias is suppression-dominated; needs free-burning subset or extended-attack model first | 2026-09-20 |
 | Pyrome × fuel tables | not started | |
 | Fuel set decision (`scott_burgan` vs `mediterranean`) | first batch favours `mediterranean` (J 0.177 vs 0.155, bias 2.8 vs 4.6); default unchanged pending a suppression-aware rerun | 2026-09-20 |
@@ -107,7 +107,7 @@ points and timing.
 | 2026-09-20 | 18 (2019–2024, ≥100 ha; 2 skipped at the coverage edge) | `scott_burgan_adj1_h24`, 4 members, pmin 0.5, barriers on | 0.155 / 0.150 | 0.252 | 4.62 (0.77–5.87) | ERA5 weather, 24 h, no suppression |
 | 2026-09-20 | same 18 | `mediterranean_adj1_h24` | **0.177** / 0.138 | **0.278** | **2.82** (0.56–6.52) | better on 11/18 fires; on par with CloudFire's CONUS mean |
 
-Per-fire results: `backend/fire_spread/data/hindcast/<tag>.csv`, log in `batch.log`.
+Per-fire results: `backend/data/fire_spread/hindcast/<tag>.csv`, log in `batch.log`.
 
 What the first batch says:
 

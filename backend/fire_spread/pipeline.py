@@ -15,6 +15,7 @@ cells over the domain, ELMFIRE interpolates bilinearly) and stack one block of
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -122,12 +123,19 @@ class Pipeline:
         if not land.contains(x, y):
             raise ls.OutsideCoverage("ignition outside static data coverage (Catalonia)")
 
-        # 3. static landscape window (recent DARP burns remapped for the ignition year)
+        # 3. static landscape window (recent DARP burns remapped for the ignition year).
+        # The raster work here, in 4 and in 7 takes seconds of CPU and disk; it runs in a
+        # worker thread so the other routes of the app stay responsive during a simulation.
         t = time.perf_counter()
         use_barriers = s.use_barriers and land.has_barriers
-        win = land.read_window(domain, now_year=start.year, barriers=use_barriers, burn_min_age=1 if s.hindcast else 0)
-        ls.check_ignition(win, x, y)
-        ls.write_inputs(win, run_dir / "inputs", adj=s.adj_factor)
+
+        def landscape_step():
+            win = land.read_window(domain, now_year=start.year, barriers=use_barriers, burn_min_age=1 if s.hindcast else 0)
+            ls.check_ignition(win, x, y)
+            ls.write_inputs(win, run_dir / "inputs", adj=s.adj_factor)
+            return win
+
+        win = await asyncio.to_thread(landscape_step)
         timings["landscape_s"] = time.perf_counter() - t
 
         # 4. weather grid over the domain: deterministic + NWP ensemble members
@@ -140,7 +148,7 @@ class Pipeline:
         n_members = len(weather.members)
         # several blocks: pad to whole days so the diurnal clock stays aligned in every block
         bands_per_block = hours if n_members == 1 else 24 * math.ceil(hours / 24)
-        write_weather(run_dir / "weather", weather, wgrid, bands_per_block)
+        await asyncio.to_thread(write_weather, run_dir / "weather", weather, wgrid, bands_per_block)
         timings["weather_grid_s"] = time.perf_counter() - t
 
         # 5. namelist + ignitions
@@ -180,19 +188,23 @@ class Pipeline:
 
         # 7. aggregate (arrival times relative to the ignition, clipped to the horizon)
         t = time.perf_counter()
-        cases, stack, transform, crs = aggregate.load_stack(run_dir / "outputs")
-        if len(cases) != req.ensemble_members:
-            log.warning("run %s: expected %d cases, found %d", run_id, req.ensemble_members, len(cases))
-        offsets = np.array([
-            (elmfire_config.start_band(k, n_members, bands_per_block) - 1) * 3600.0 + tstart_s for k in cases
-        ], dtype=np.float32)
-        burned = stack >= 0
-        stack = np.where(burned, np.clip(stack - offsets[:, None, None], 0.0, req.duration_hours * 3600.0), -1.0)
-        # ELMFIRE stamps the ignition cell with the time of its first (CFL-sized) step
-        ir, ic = int((domain.yur - y) // cellsize), int((x - domain.xll) // cellsize)
-        stack[:, ir, ic] = 0.0
-        stats = aggregate.summarise(stack)
-        grid = aggregate.to_arrival_grid(stats, transform, crs, win.coverage, x, y, ign.lat, ign.lon, cellsize)
+
+        def aggregate_step():
+            cases, stack, transform, crs = aggregate.load_stack(run_dir / "outputs")
+            if len(cases) != req.ensemble_members:
+                log.warning("run %s: expected %d cases, found %d", run_id, req.ensemble_members, len(cases))
+            offsets = np.array([
+                (elmfire_config.start_band(k, n_members, bands_per_block) - 1) * 3600.0 + tstart_s for k in cases
+            ], dtype=np.float32)
+            burned = stack >= 0
+            stack = np.where(burned, np.clip(stack - offsets[:, None, None], 0.0, req.duration_hours * 3600.0), -1.0)
+            # ELMFIRE stamps the ignition cell with the time of its first (CFL-sized) step
+            ir, ic = int((domain.yur - y) // cellsize), int((x - domain.xll) // cellsize)
+            stack[:, ir, ic] = 0.0
+            stats = aggregate.summarise(stack)
+            return stats, aggregate.to_arrival_grid(stats, transform, crs, win.coverage, x, y, ign.lat, ign.lon, cellsize)
+
+        stats, grid = await asyncio.to_thread(aggregate_step)
         timings["aggregate_s"] = time.perf_counter() - t
 
         zone = zone_info(Path(s.data_dir), ign.lat, ign.lon) if isinstance(land, ls.Landscape) else {}

@@ -7,7 +7,7 @@ import respx
 
 from fire_spread import weather as wx
 from fire_spread.models import WeatherProviderError
-from tests.conftest import FIXTURES
+from tests.fire_spread.conftest import FIXTURES
 
 T0 = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
 

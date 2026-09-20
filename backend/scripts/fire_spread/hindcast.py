@@ -1,18 +1,17 @@
 #!/usr/bin/env python
 """Hindcast DARP fire perimeters with the pipeline and score them (calibration loop).
 
-Run inside the container (needs ELMFIRE + ogr2ogr + the static tier):
+Run inside the container (needs ELMFIRE + ogr2ogr + the static tier), from ``backend/``:
 
-    docker run --rm --shm-size=2g -v "$PWD:/app" -v fs-venv:/opt/venv2 -e DATA_DIR=/app/data/catalonia \\
-        fireprotector/fire-spread bash scripts/run_in_container.sh scripts.hindcast --min-ha 100 --limit 10
-    ... scripts.hindcast --fuels mediterranean --adj 0.8 --years 2019-2024
+    docker compose run --rm api python -m scripts.fire_spread.hindcast --min-ha 100 --limit 10
+    ... hindcast --fuels mediterranean --adj 0.8 --years 2019-2024
 
-Per fire: perimeter + date from ``data/raw/incendis/<year>/*.shp`` (converted once to
+Per fire: perimeter + date from ``data/fire_spread/raw/incendis/<year>/*.shp`` (converted once to
 ``<year>/*.4326.geojson``) → ERA5 archive weather at the centroid → ignition at
 the most upwind burnable point of the perimeter (DARP has no ignition point or time; 12:00 UTC
 assumed) → pipeline run (archive weather, statistical wind perturbations) → burn probability
 ≥ ``--pmin`` vs the observed perimeter: Jaccard, Sørensen, area bias. Results in
-``data/hindcast/<tag>.csv`` and a summary line to paste into docs/elmfire-pipe-assessment.md.
+``data/fire_spread/hindcast/<tag>.csv`` and a summary line to paste into docs/elmfire-pipe-assessment.md.
 """
 
 from __future__ import annotations
@@ -34,16 +33,14 @@ from rasterio.transform import from_origin
 from shapely.geometry import shape
 from shapely.ops import transform as shp_transform
 
-HERE = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(HERE))
+from fire_spread import landscape as ls, weather as wx
+from fire_spread.models import Ignition, OutsideCoverage, PipelineError, SimulationRequest
+from fire_spread.pipeline import Pipeline
+from fire_spread.settings import Settings
 
-from fire_spread import landscape as ls, weather as wx  # noqa: E402
-from fire_spread.models import Ignition, OutsideCoverage, PipelineError, SimulationRequest  # noqa: E402
-from fire_spread.pipeline import Pipeline  # noqa: E402
-from fire_spread.settings import Settings  # noqa: E402
-
-RAW = HERE / "data" / "raw" / "incendis"
-OUT = HERE / "data" / "hindcast"
+# Relative to the cwd (backend/ on the host, /srv in the container), like fire_spread.settings.
+RAW = Path("data/fire_spread/raw/incendis")
+OUT = Path("data/fire_spread/hindcast")
 IGNITION_HOUR_UTC = 12
 INSET_M = 100.0  # ignition pulled this far inside the perimeter from the upwind edge
 CANDIDATES = 8  # upwind-most vertices tried until one is on burnable fuel

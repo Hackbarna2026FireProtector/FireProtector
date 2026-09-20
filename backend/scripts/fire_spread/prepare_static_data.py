@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """One-off ETL: build the Catalonia-wide 50 m static tier for ELMFIRE.
 
-Run inside the container (needs GDAL CLI tools):
+Run inside the container (needs GDAL CLI tools), from ``backend/``:
 
-    docker compose run --rm fire-spread python scripts/prepare_static_data.py
+    scripts/setup_fire_data.sh   # = docker compose run --rm api python -m scripts.fire_spread.prepare_static_data
 
-Outputs ``data/catalonia/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif`` (Int16 COGs on one
+Outputs ``data/fire_spread/catalonia/{dem,slp,asp,fbfm40,cc,ch,cbh,cbd}.tif`` (Int16 COGs on one
 common grid: EPSG:25831, 50 m, x 260000-540000, y 4480000-4760000 = 5600x5600),
 ``zhr.gpkg`` + ``zhr.geojson`` and ``manifest.json``.
 
@@ -44,7 +44,8 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-HERE = Path(__file__).resolve().parent.parent
+# Relative to the cwd (backend/ on the host, /srv in the container), like fire_spread.settings.
+DATA = Path("data/fire_spread")
 CRS = "EPSG:25831"
 RES = 50.0
 XMIN, YMIN, XMAX, YMAX = 260_000.0, 4_480_000.0, 540_000.0, 4_760_000.0
@@ -354,8 +355,8 @@ def step_manifest(out: Path, sources: dict) -> None:
 def main() -> int:
     global RES
     ap = argparse.ArgumentParser()
-    ap.add_argument("--raw", type=Path, default=HERE / "data" / "raw")
-    ap.add_argument("--out", type=Path, default=HERE / "data" / "catalonia")
+    ap.add_argument("--raw", type=Path, default=DATA / "raw")
+    ap.add_argument("--out", type=Path, default=DATA / "catalonia")
     ap.add_argument("--steps", default="zhr,dem,fuel,canopy,burns,barriers,agri,manifest")
     ap.add_argument("--res", type=float, default=RES, help="cell size in m (default 50; 30 = ELMFIRE's usual)")
     a = ap.parse_args()

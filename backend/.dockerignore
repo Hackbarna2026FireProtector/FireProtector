@@ -1,10 +1,14 @@
 .venv/
+**/.venv/
 .env
 __pycache__/
 *.py[cod]
 .pytest_cache/
 db/
+data/
 scripts/
+!scripts/__init__.py
+!scripts/fire_spread/
 tests/
 docker-compose.yml
 Dockerfile

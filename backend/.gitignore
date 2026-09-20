@@ -8,3 +8,7 @@ __pycache__/
 # Loader staging area (CSV batches, deleted as they are loaded)
 db/import/*
 !db/import/.gitkeep
+
+# ELMFIRE static tier, source downloads, run directories, hindcast results
+# (scripts/setup_fire_data.sh; several GB)
+data/fire_spread/
