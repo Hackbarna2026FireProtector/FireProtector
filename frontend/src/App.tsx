@@ -129,6 +129,8 @@ export default function App() {
         <main className="relative min-w-0">
           <MapView
             scenario={scenario}
+            scenarios={scenarioList}
+            onScenario={setScenarioId}
             spread={spread}
             scored={result}
             t={tMin}

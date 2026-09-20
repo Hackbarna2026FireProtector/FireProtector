@@ -78,6 +78,14 @@ export default function MapLegend() {
           />
           {t("legend.ignition")}
         </li>
+        <li className="flex items-center gap-1.5">
+          <span
+            className="h-2.5 w-2.5 shrink-0 rounded-full border-2"
+            style={{ background: "#F59E0B40", borderColor: "#F59E0B" }}
+            aria-hidden="true"
+          />
+          {t("legend.other")}
+        </li>
       </ul>
 
       <h3 className="mb-1 mt-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">

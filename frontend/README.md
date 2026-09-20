@@ -67,7 +67,8 @@ type, value and vulnerability are identical across thousands of them.
 src/
 ├── App.tsx              ranked list | map | controls, detail, charts, briefing
 ├── api/                 client.ts (fetch + ApiError), hooks.ts, types.ts
-├── map/MapView.tsx      MapLibre: ICGC basemap, contours, assets by tier
+├── map/MapView.tsx      MapLibre: ICGC basemap, contours, assets by tier,
+│                        the other scenarios' ignition points
 ├── components/          RankedList, ControlPanel, AssetDetail, ChartsPanel,
 │   │                    BriefingPanel, Header, MapLegend
 │   └── ui/              local primitives — Button, Badge, Card, Select,
@@ -85,6 +86,14 @@ resolve conflicts — the note at the top of `ui/cn.ts` says what that costs and
 what swapping the real library in would take. The sliders and the two selects
 are native controls, which is where the keyboard behaviour comes from; adopting
 Radix would mean adding `@radix-ui/react-slider` and friends.
+
+Every scenario's ignition point is on the map, not just the one being viewed.
+The others are hollow amber rings, off-screen at the zoom `fitBounds` lands on
+and coming into view as you zoom out; clicking one switches scenario, exactly
+as the header picker does. They are a separate source from the active
+`ignition` so the two can be styled and hit-tested apart. The basemap is raster
+and the style sets no `glyphs`, so their labels are MapLibre popups on hover —
+a `text-field` symbol layer would render nothing.
 
 The time scrubber in `ControlPanel` restyles the contours against `t`; it does
 not refetch. Changing a scoring parameter does refetch — both `/score` and
