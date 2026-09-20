@@ -68,6 +68,15 @@ services:
       # route answers 500 and the rest of the API is unaffected.
       DEEPFIRE_CLIENT_ID: ${DEEPFIRE_CLIENT_ID:-}
       DEEPFIRE_CLIENT_SECRET: ${DEEPFIRE_CLIENT_SECRET:-}
+      # Nebius Token Factory, for the /api briefings. Left unset, the decision
+      # layer writes deterministic template briefings rather than calling an
+      # LLM, and every other route is unaffected.
+      NEBIUS_API_KEY: ${NEBIUS_API_KEY:-}
+      # Overpass mirrors for the named critical facilities, as a JSON array.
+      # Unset uses the provider's own list. Worth pinning on a network where
+      # the default mirror is unreachable: without it the ranking still works,
+      # but nothing in it has a name.
+      OVERPASS_URLS: ${OVERPASS_URLS:-}
     ports:
       # 5102 is the port the asset-register contract names, so the frontend and
       # the decision layer find the API where they expect it.
@@ -77,6 +86,12 @@ services:
       # editing app/ or fire_spread/ does not need a rebuild.
       - ./app:/srv/app:ro
       - ./fire_spread:/srv/fire_spread:ro
+      # The decision layer's only writable directory: recorded scenario
+      # bundles, the briefing cache and the briefing log. Read-write, and a
+      # bind mount rather than a named volume so a recorded bundle can be
+      # inspected, committed or hand-copied between machines -- which is what
+      # makes the app demonstrable with no Deepfire credentials at all.
+      - ./data:/srv/data
     command:
       ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 

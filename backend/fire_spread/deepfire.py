@@ -12,6 +12,11 @@ from shapely.geometry.base import BaseGeometry
 
 DURATION_HOURS = 24
 MODEL = "elmfire"
+# Above 1, the API reports how much of the ensemble burned each perimeter as
+# `burn_probability`. That field is the only measure of forecast confidence it
+# exposes, and the decision layer's scoring uses it; a single-member run omits
+# it entirely. Deepfire accepts 1-50.
+ENSEMBLE_MEMBERS = 10
 TERMINAL_STATUSES = {"COMPLETED", "NO_SPREAD", "FAILED"}
 POLL_INTERVAL_S = 5.0  # docs recommend ~10s; sims usually finish in <1 min
 MAX_WAIT_S = 1200.0  # Deepfire itself times out a sim to FAILED after 60 min
@@ -74,7 +79,29 @@ class DeepfireClient:
     # -- fire spread --------------------------------------------------------
 
     async def run_simulation(self, lat: float, lon: float) -> list[tuple[int, BaseGeometry]]:
-        """Queue a point-ignition simulation, block until done, return (hour, perimeter) sorted by hour."""
+        """Queue a point-ignition simulation, block until done, return (hour, perimeter) sorted by hour.
+
+        Only the perimeters every ensemble member agrees on. The lower-
+        probability fringes are dropped here because callers of this method
+        assume perimeters nest -- hour h contains hour h-1 -- and a fringe
+        polygon does not.
+        """
+        perimeters = await self.run_simulation_detailed(lat, lon)
+        certain = max((p for _, p, _ in perimeters), default=1.0)
+        return [(hour, geom) for hour, prob, geom in perimeters if prob >= certain]
+
+    async def run_simulation_detailed(
+        self, lat: float, lon: float
+    ) -> list[tuple[int, float, BaseGeometry]]:
+        """As above, but keeping each perimeter's ensemble agreement.
+
+        Returns ``(hour, burn_probability, perimeter)``. With ENSEMBLE_MEMBERS
+        above 1 the API returns, per hour, the core all members burned at
+        probability 1.0 and -- at the final hour -- additional envelopes at
+        lower probabilities. That is the only real measure of forecast
+        confidence available, so the decision layer scores against it; see
+        docs/deepfire-api.md.
+        """
         r = await self._request(
             "POST",
             "/v1/fire-spread/simulations",
@@ -83,6 +110,7 @@ class DeepfireClient:
                 "longitude": lon,
                 "durationHours": DURATION_HOURS,
                 "model": MODEL,
+                "ensembleMembers": ENSEMBLE_MEMBERS,
             },
         )
         if r.status_code == 429 or r.status_code == 503:
@@ -109,7 +137,7 @@ class DeepfireClient:
             code = 422 if "outside the supported simulation areas" in msg else 502
             raise DeepfireError(msg, code)
 
-        hourly: list[tuple[int, BaseGeometry]] = []
+        hourly: list[tuple[int, float, BaseGeometry]] = []
         for feat in (body.get("result") or {}).get("features", []):
             props = feat.get("properties") or {}
             hour = props.get("hour")
@@ -117,6 +145,11 @@ class DeepfireClient:
                 hour = round(props["elapsed_seconds"] / 3600)
             if hour is None or feat.get("geometry") is None:
                 continue
-            hourly.append((int(hour), shape(feat["geometry"])))
-        hourly.sort(key=lambda t: t[0])
+            # Absent on a single-member run, where every perimeter is certain.
+            prob = props.get("burn_probability")
+            prob = 1.0 if prob is None else float(prob)
+            hourly.append((int(hour), prob, shape(feat["geometry"])))
+        # Descending probability within an hour, so the certain core comes
+        # first and `max` in run_simulation has a stable thing to compare.
+        hourly.sort(key=lambda t: (t[0], -t[1]))
         return hourly

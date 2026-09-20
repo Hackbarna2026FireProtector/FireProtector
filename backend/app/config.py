@@ -38,6 +38,26 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["*"]
 
+    # ------------------------------------------------------------ decision --
+    # Settings below belong to the decision layer under /api. Every one has a
+    # working default, so the asset-register API starts unchanged without them.
+
+    # Metres of slack around the outermost arrival contour when choosing which
+    # assets to score. Small on purpose: an asset the fire never reaches scores
+    # exactly zero, so a wide margin costs payload and buys nothing.
+    reached_margin_m: float = 1_000.0
+
+    # Overpass mirrors for the named critical facilities, tried in order.
+    # Empty means the provider's own list; set OVERPASS_URLS as a JSON array to
+    # pin a mirror when the default one is unreachable.
+    overpass_urls: list[str] = []
+
+    # Nebius Token Factory, for briefings. With no key the deterministic
+    # template path is used instead, which is always valid by construction.
+    nebius_api_key: str = ""
+    nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
+    nebius_model: str = "meta-llama/Llama-3.3-70B-Instruct"
+
 
 @lru_cache
 def get_settings() -> Settings:

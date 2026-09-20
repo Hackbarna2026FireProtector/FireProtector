@@ -14,7 +14,7 @@ from fire_spread import router as fire_spread_router
 from .config import Settings, get_settings
 from .db import create_pool, get_pool
 from .errors import install_handlers
-from .routers import add_building, assets, building_specs
+from .routers import add_building, assets, building_specs, decision
 from .schemas import HealthResponse
 
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +41,12 @@ def create_app() -> FastAPI:
             "Asset register for the wildfire values-at-risk tool. GET /assets "
             "implements the asset-register contract; the other two routes are "
             "internal. GET /fire/arrival-grid runs a Deepfire fire-spread "
-            "simulation and returns the hour the fire reaches each grid cell."
+            "simulation and returns the hour the fire reaches each grid cell.\n\n"
+            "Everything under /api is the decision layer: it takes an ignition "
+            "scenario, works out what the fire reaches and ranks it. Those "
+            "routes serve one front end and may change with it; the routes at "
+            "the root implement a contract shared with other people's code and "
+            "do not."
         ),
         version="1.0.0",
         lifespan=lifespan,
@@ -59,6 +64,8 @@ def create_app() -> FastAPI:
     # Mounted from the sibling `fire_spread` package rather than app/routers:
     # it talks to Deepfire, not to Postgres, and stays independently mountable.
     app.include_router(fire_spread_router, prefix="/fire")
+    # The decision layer. Prefixed, because the root belongs to the contract.
+    app.include_router(decision.router)
     install_handlers(app)
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])
